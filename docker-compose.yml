@@ -1,0 +1,16 @@
+services:
+  region3d:
+    build: .
+    image: region3d:latest
+    ports:
+      - "8501:8501"
+    volumes:
+      # Mount sample data and output dirs from the host so they persist.
+      - ./lib:/app/lib
+      - ./python/output:/app/python/output
+      - ./python/output_webui:/app/python/output_webui
+    environment:
+      - PYTHONUNBUFFERED=1
+      - NUMBA_CACHE_DIR=/tmp/numba_cache
+    # Default = Streamlit UI; override with e.g.
+    #   docker compose run --rm region3d python python/driver.py --soil_strength_mode 2

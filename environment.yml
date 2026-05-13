@@ -1,0 +1,33 @@
+# Conda environment for the RegionGrow3D Python port.
+# Recommended over the pip-only path because rasterio (GDAL), numba (llvmlite)
+# and scipy/numpy (BLAS) all link to native libraries that conda-forge keeps
+# in sync.
+#
+# Create the environment:
+#     conda env create -f environment.yml
+#     conda activate region3d
+#
+# Update after edits to this file:
+#     conda env update -f environment.yml --prune
+#
+# Versions are minima — newer should also work. Tested with Python 3.13.
+
+name: region3d
+channels:
+  - conda-forge
+dependencies:
+  - python=3.13
+  # Core numerics
+  - numpy>=2.0
+  - scipy>=1.13
+  # I/O & geospatial
+  - rasterio>=1.3
+  # Image processing
+  - scikit-image>=0.22
+  # JIT acceleration
+  - numba>=0.60
+  # Visualisation
+  - matplotlib>=3.8
+  # Web UI
+  - streamlit>=1.50
+  - pandas>=2.0

@@ -1,0 +1,83 @@
+RegionGrow3D — Python port + Streamlit Web UI
+==============================================
+
+This repository is **dual-licensed**.
+
+Most of the source is dedicated to the public domain via Creative Commons
+Zero 1.0 Universal (CC0-1.0), preserving the licensing of the upstream
+USGS RegionGrow3D code (https://code.usgs.gov/ghsc/lhp/regiongrow3d).
+
+A subset of the preprocessing module is derived from TopoToolbox
+(W. Schwanghart, https://github.com/wschwanghart/topotoolbox) and is
+therefore licensed under GNU General Public License v3.0 or later
+(GPL-3.0-or-later).
+
+
+-----------------------------------------------------------------------
+1) CC0 1.0 Universal — DEFAULT FOR THIS REPOSITORY
+-----------------------------------------------------------------------
+
+   Applies to: every file UNLESS its header says otherwise.
+
+   Full legal text: see `LICENSE-CC0`
+   Reference:       https://creativecommons.org/publicdomain/zero/1.0/
+
+   Notes:
+   - The originating MATLAB source from USGS is U.S. public-domain work
+     (federal government). USGS additionally applied CC0 worldwide.
+   - This Python port preserves CC0 to maximise downstream freedom for
+     research and engineering use.
+   - There is NO warranty.
+
+
+-----------------------------------------------------------------------
+2) GPL-3.0-or-later — TOPOTOOLBOX-DERIVED CODE
+-----------------------------------------------------------------------
+
+   Applies to:
+     - The following functions inside `python/region3d/preprocessing.py`:
+         * `fillsinks`                  (port of `fillsinks.m`)
+         * `identify_flats`             (port of `identifyflats.m`)
+         * `flow_direction`             (port of `FLOWobj.m` / `FLOWobjInv.m`)
+         * `flow_accumulation`          (port of `flowacc.m`)
+         * `_graydist_quasi`            (helper used by flow_direction)
+         * `_imreconstruct`             (helper used by fillsinks)
+         * `_regional_minima`           (helper used by identify_flats)
+         * `_clear_border`              (helper used by identify_flats)
+
+   Each of those functions carries an SPDX header documenting the
+   GPL-3.0-or-later licence and crediting TopoToolbox.
+
+   Full legal text: see `LICENSE-GPL`
+   Reference:       https://www.gnu.org/licenses/gpl-3.0.txt
+
+   Notes:
+   - Combined / linked use of these functions with other code triggers
+     the GPL-3.0 copyleft requirements on the resulting program.
+   - All other functions in `preprocessing.py` (e.g. `soil_depth`,
+     `ridges_valleys`) are CC0; they CALL the GPL functions, but the CC0
+     functions themselves are permissively licensed for downstream users
+     who reimplement / replace the GPL parts.
+
+
+-----------------------------------------------------------------------
+3) DOWNSTREAM USE
+-----------------------------------------------------------------------
+
+   - You may take any single CC0 file and use it under CC0 only.
+   - If you reuse the GPL-3.0 portions OR distribute the project as a
+     whole, you must comply with GPL-3.0-or-later (most notably, supply
+     the corresponding source).
+   - When citing the project academically, please reference:
+       Mathews et al. (2024). RegionGrow3D: A Deterministic Analysis for
+       Characterizing Discrete Three-Dimensional Landslide Source Areas
+       on a Regional Scale. JGR Earth Surface, 129.
+
+
+-----------------------------------------------------------------------
+4) NO ENDORSEMENT
+-----------------------------------------------------------------------
+
+   Use of these materials does not imply endorsement by the U.S.
+   Geological Survey, the U.S. Department of the Interior, the
+   TopoToolbox authors, or any contributor to this Python port.

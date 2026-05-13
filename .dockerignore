@@ -1,0 +1,31 @@
+.git
+.gitignore
+.dockerignore
+.claude
+.vscode
+.idea
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+*.nbi
+*.nbc
+
+# Output / runtime artefacts
+python/output
+python/output_*
+*.log
+
+# Reference papers (ship separately)
+reference
+
+# Sample data — should be mounted at run-time, not baked in
+lib/DEM/*.tif
+lib/DEM/*.tiff
+lib/**/*.mat
+lib/soil_depth/*.tif
+post_processing/**/*.tif
+post_processing/**/*.mat
+
+# Tests are not needed for container runtime
+python/tests
