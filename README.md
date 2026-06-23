@@ -249,8 +249,16 @@ for the function-level breakdown and reuse rules.
   Fiorucci, F., & Guzzetti, F. (2016). *Automatic delineation of
   geomorphological slope units with `r.slopeunits` v1.0 and their
   optimization for landslide susceptibility modeling.* Geoscientific
-  Model Development, 9, 3975–3991.
-  (The original `r.slopeunits` is run via `nogrow_source=grass`, bundled in the Docker image.)
+  Model Development, 9, 3975–3991. <https://doi.org/10.5194/gmd-9-3975-2016>
+  (the slope-unit delineation [`create`] and optimisation [`metrics`/`optimize`]).
+- Alvioli, M., Guzzetti, F., & Marchesini, I. (2020). *Parameter-free
+  delineation of slope units and terrain subdivision of Italy.*
+  Geomorphology, 358, 107124. <https://doi.org/10.1016/j.geomorph.2020.107124>
+  (basis for the automatic parameter optimisation, `r.slopeunits.optimize`).
+- GRASS GIS addon **`r.slopeunits`** (Marchesini, Alvioli, Metz, Tawalika, et al.).
+  Run directly via `nogrow_source=grass`; bundled in the Docker image with
+  `g.extension r.slopeunits` (create / clean / metrics / optimize).
+  <https://grass.osgeo.org/grass-stable/manuals/addons/r.slopeunits.html>
 - Hungr, O. (1989). *An extension of Bishop's simplified method of slope
   stability analysis to three dimensions.* Géotechnique, 39(4), 559–562.
 - Companion repository for building `shear_strength.mat`:

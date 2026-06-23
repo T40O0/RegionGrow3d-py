@@ -231,8 +231,16 @@ Python 側の各モジュールには docstring 冒頭に対応する MATLAB 関
   Fiorucci, F., & Guzzetti, F. (2016). *Automatic delineation of
   geomorphological slope units with `r.slopeunits` v1.0 and their
   optimization for landslide susceptibility modeling.* Geoscientific
-  Model Development, 9, 3975–3991.
-  (本家 `r.slopeunits` を `nogrow_source=grass` で実行。Docker イメージに同梱)
+  Model Development, 9, 3975–3991. <https://doi.org/10.5194/gmd-9-3975-2016>
+  (スロープユニット delineation [`create`] と最適化 [`metrics`/`optimize`] の原典)
+- Alvioli, M., Guzzetti, F., & Marchesini, I. (2020). *Parameter-free
+  delineation of slope units and terrain subdivision of Italy.*
+  Geomorphology, 358, 107124. <https://doi.org/10.1016/j.geomorph.2020.107124>
+  (自動パラメータ最適化 [`r.slopeunits.optimize`] の基礎)
+- GRASS GIS addon **`r.slopeunits`** (Marchesini, Alvioli, Metz, Tawalika ほか).
+  本パイプラインは `nogrow_source=grass` でこれを直接実行(Docker イメージに
+  `g.extension r.slopeunits` で同梱: create / clean / metrics / optimize)。
+  <https://grass.osgeo.org/grass-stable/manuals/addons/r.slopeunits.html>
 - Hungr, O. (1989). *An extension of Bishop's simplified method of slope
   stability analysis to three dimensions.* Géotechnique, 39(4), 559–562.
 - `shear_strength.mat` 作成用の姉妹リポジトリ:
