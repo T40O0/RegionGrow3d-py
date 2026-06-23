@@ -62,8 +62,6 @@ from region3d.matlab_compat import find_F
 from region3d.region_grow import region_grow_fxn
 from region3d.preprocessing import (soil_depth as compute_soil_depth,
                                     ridges_valleys as compute_ridges_valleys)
-from region3d.slopeunits import (ridges_valleys_slopeunits
-                                    as compute_ridges_valleys_su)
 
 
 # Sample-name-free defaults. DEM_path / test_no are required (see main()).
@@ -95,16 +93,27 @@ DEFAULTS = dict(
     soil_depth_endtime=5000.0,  # years for the Roering hillslope-evolution model
     ridge_acc_thresh=5.0,
     valley_acc_thresh=100.0,
-    # ---- Slope-unit option (nogrow_source='slopeunits', Alvioli 2016/2025) ---
-    slope_unit_thresh=500000.0,  # initial channel-defining acc threshold [m^2]
-    slope_unit_areamin=100000.0, # minimum unit area [m^2]
+    # ---- Slope-unit option (nogrow_source='grass' → GRASS r.slopeunits) ------
+    slope_unit_thresh=500000.0,  # r.slopeunits thresh: channel-defining acc area [m^2]
+    slope_unit_areamin=100000.0, # r.slopeunits areamin: minimum unit area [m^2]
     slope_unit_cvmin=0.3,        # aspect circular-variance ceiling
-    slope_unit_rf=2.0,           # threshold reduction factor per iteration
-    slope_unit_maxiter=10,       # max refinement iterations
-    slope_unit_nested=1,         # 1 = v2.0 (per-unit local subdivision, default) | 0 = v1.0 (global resegment)
+    slope_unit_rf=2.0,           # threshold reduction factor (cast to int for r.slopeunits)
+    slope_unit_maxiter=50,       # max refinement iterations (r.slopeunits example uses 50)
+    slope_unit_save_shp=1,       # 1 = also export slope units as vector (SHP/GeoJSON/GPKG) to lib/no_grow/
+    slope_unit_shp_format='.shp',# .shp | .geojson | .gpkg
+    slope_unit_shp_min_cells=1,  # drop units smaller than this many cells from the vector
+    slope_unit_shp_wgs84=0,      # 1 = reproject vector to EPSG:4326 (for GeoJSON/web)
+    slope_unit_shp_clip='',      # clip slope-unit polygons to this land (or sea) coastline vector
+    slope_unit_shp_clip_invert=0,# 1 = treat --slope_unit_shp_clip as SEA and subtract it (else LAND)
+    # ---- GRASS r.slopeunits.optimize (morphometric F=V*I, no inventory; slow) -
+    slope_unit_optimize=0,       # 1 = auto-optimise cvmin/areamin via r.slopeunits.optimize
+    slope_unit_cvmin_min=0.05, slope_unit_cvmin_max=0.25,      # cvmin search range
+    slope_unit_areamin_min=50000.0, slope_unit_areamin_max=200000.0,  # areamin search range [m^2]
+    slope_unit_opt_epsx=0.01,    # optimize: stop when cvmin range < this
+    slope_unit_opt_epsy=50000.0, # optimize: stop when areamin range < this [m^2]
     # ---- Per-component data source (replaces legacy preprocess_source) -------
     soil_depth_source='mat',    # 'mat' (load soil_depth_mat) | 'compute' (Python)
-    nogrow_source='mat',        # 'mat' | 'compute' (D8 ridges/valleys) | 'slopeunits'
+    nogrow_source='mat',        # 'mat' | 'compute' (D8 ridges/valleys) | 'grass' (GRASS r.slopeunits, Docker)
     preprocess_source='',       # legacy: if non-empty, sets both above (back-compat)
     save_intermediates=0,       # 1 = also write depth/nogrow/PGA/hillshade TIFFs to out_dir
     susname_override='',        # if non-empty, use this string as the output subdir name (else "{test_no:05d}")
@@ -147,11 +156,19 @@ def _build_pga(Z, georef, args):
 
     if mode == 'raster':
         if not args.PGA_path:
-            raise ValueError("seismic_mode='raster' requires --PGA_path")
+            raise SystemExit("[missing input] seismic_mode='raster' requires "
+                             "--PGA_path (a PGA GeoTIFF on the DEM grid).")
         path = Path(args.PGA_path)
         if not path.is_absolute():
             path = (REPO_ROOT / path).resolve()
+        if not path.exists():
+            raise SystemExit(f"[missing input] PGA raster not found:\n  {path}")
         Z_pga, _geo_pga = read_dem(path)  # NaN handling matches driver.m: <0 -> NaN
+        if Z_pga.shape != Z.shape:
+            raise SystemExit(
+                f"[shape mismatch] PGA raster has shape {Z_pga.shape} but the "
+                f"DEM is {Z.shape}.\n  source: {path}\n"
+                f"  -> Resample/clip the PGA raster to the same grid as the DEM.")
         PGA = Z_pga.astype(f32, copy=True)
         PGA[np.isnan(Z)] = np.nan
         PGA = PGA * f32(args.pseudo_scaling)
@@ -184,6 +201,38 @@ def _set_keep_awake(enable: bool) -> None:
     except Exception:
         # Silently ignore — the user can still complete the run manually.
         pass
+
+
+def _require_file(path, *, what):
+    """Fail with a clear message (no traceback) when an input file is missing."""
+    p = Path(path) if path else None
+    if not path or not p.exists():
+        raise SystemExit(
+            f"[missing input] {what} not found:\n"
+            f"  {path}\n"
+            f"  -> Check the path, or generate this input for the SELECTED "
+            f"DEM (it must match the DEM you are running).")
+    return p
+
+
+def _require_shape(arr, ref_shape, *, what, src):
+    """Fail with a clear message when a loaded array does not match the DEM.
+
+    The most common cause is loading a soil-depth / no-grow / PGA file that was
+    produced for a DIFFERENT DEM (e.g. the old 5 m grid) — the raw NumPy
+    broadcast error ("operands could not be broadcast together") is replaced by
+    an actionable message that names both shapes and the offending file.
+    """
+    if tuple(arr.shape) != tuple(ref_shape):
+        raise SystemExit(
+            f"[shape mismatch] {what} has shape {tuple(arr.shape)} but the "
+            f"DEM is {tuple(ref_shape)}.\n"
+            f"  source: {src}\n"
+            f"  -> This file belongs to a DIFFERENT DEM. For THIS DEM either "
+            f"select the matching file, or regenerate it:\n"
+            f"       soil depth : soil_depth_source='compute' (or uniform mode)\n"
+            f"       no-grow    : nogrow_source='compute' or 'grass'\n"
+            f"       PGA raster : provide a PGA GeoTIFF on the same grid as the DEM")
 
 
 def run(args):
@@ -237,8 +286,10 @@ def _run_impl(args):
         print(f"  saved: {sd_save.relative_to(REPO_ROOT).as_posix()}", flush=True)
     else:
         print(f"Loading soil depth: {args.soil_depth_mat}")
-        depth = load_soil_depth(args.soil_depth_mat)
-        depth = depth.astype(np.float32)
+        _require_file(args.soil_depth_mat, what='soil-depth .mat')
+        depth = load_soil_depth(args.soil_depth_mat).astype(np.float32)
+        _require_shape(depth, Z.shape, what='soil depth',
+                       src=args.soil_depth_mat)
 
     print("Computing subsurface derivatives (Z - depth)...")
     Z_sub = Z - depth
@@ -293,36 +344,14 @@ def _run_impl(args):
         nogrow_j = np.zeros(0, dtype=np.int64)
         ridge_io = np.zeros(Z.shape, dtype=bool)
         valley_io = np.zeros(Z.shape, dtype=bool)
-    elif args.nogrow_source in ('compute', 'slopeunits'):
-        if args.nogrow_source == 'slopeunits':
-            nested_flag = bool(int(args.slope_unit_nested))
-            print(f"Computing slope units "
-                  f"({'v2.0 nested' if nested_flag else 'v1.0'} "
-                  f"thresh={args.slope_unit_thresh:.0f} m^2, "
-                  f"areamin={args.slope_unit_areamin:.0f} m^2, "
-                  f"cvmin={args.slope_unit_cvmin:.2f}, rf={args.slope_unit_rf:.2f}, "
-                  f"maxiter={args.slope_unit_maxiter}) ...")
-            t_rv = time.time()
-            rv = compute_ridges_valleys_su(
-                Z, georef.x_cellsize,
-                thresh=args.slope_unit_thresh,
-                areamin=args.slope_unit_areamin,
-                cvmin=args.slope_unit_cvmin,
-                rf=args.slope_unit_rf,
-                maxiteration=args.slope_unit_maxiter,
-                nested=nested_flag,
-            )
-            mat_suffix = ('_no_grow_slopeunits_nested.mat' if nested_flag
-                           else '_no_grow_slopeunits.mat')
-        else:
-            print(f"Computing ridges/valleys (acc_thresh ridge={args.ridge_acc_thresh}, "
-                  f"valley={args.valley_acc_thresh}) ...")
-            t_rv = time.time()
-            # ridges_valleys uses the UNPADDED DEM (MATLAB re-loads from disk).
-            rv = compute_ridges_valleys(Z, georef.x_cellsize,
-                                        ridge_acc_thresh=args.ridge_acc_thresh,
-                                        valley_acc_thresh=args.valley_acc_thresh)
-            mat_suffix = '_no_grow_python.mat'
+    elif args.nogrow_source == 'compute':
+        print(f"Computing ridges/valleys (acc_thresh ridge={args.ridge_acc_thresh}, "
+              f"valley={args.valley_acc_thresh}) ...")
+        t_rv = time.time()
+        # ridges_valleys uses the UNPADDED DEM (MATLAB re-loads from disk).
+        rv = compute_ridges_valleys(Z, georef.x_cellsize,
+                                    ridge_acc_thresh=args.ridge_acc_thresh,
+                                    valley_acc_thresh=args.valley_acc_thresh)
         nogrow_io = rv.nogrow_io
         nogrow_idx = rv.nogrow_idx
         nogrow_i = rv.nogrow_i
@@ -334,7 +363,7 @@ def _run_impl(args):
         # Save to .mat so the user can later choose `mat` mode.
         from scipy.io import savemat
         ng_save = REPO_ROOT / 'lib' / 'no_grow' / \
-            f"{Path(args.DEM_path).stem}{mat_suffix}"
+            f"{Path(args.DEM_path).stem}_no_grow_python.mat"
         ng_save.parent.mkdir(parents=True, exist_ok=True)
         savemat(str(ng_save), {
             'nogrow_io': nogrow_io.astype(np.uint8),
@@ -345,8 +374,77 @@ def _run_impl(args):
             'valley_io': valley_io.astype(np.uint8),
         })
         print(f"  saved: {ng_save.relative_to(REPO_ROOT).as_posix()}", flush=True)
+    elif args.nogrow_source == 'grass':
+        # Reference slope units from GRASS r.slopeunits.create (Alvioli et al.).
+        # Requires GRASS + the r.slopeunits addon (baked into the Docker image).
+        from region3d.grass_slopeunits import (run_grass_slopeunits,
+                                               read_units, nogrow_from_units)
+        print(f"Computing slope units via GRASS r.slopeunits.create "
+              f"(thresh={args.slope_unit_thresh:.0f} m^2, "
+              f"areamin={args.slope_unit_areamin:.0f} m^2, "
+              f"cvmin={args.slope_unit_cvmin:.2f}, rf={args.slope_unit_rf:.2f}, "
+              f"maxiter={args.slope_unit_maxiter}) ...", flush=True)
+        t_rv = time.time()
+        stem = Path(args.DEM_path).stem
+        slu_tif = REPO_ROOT / 'lib' / 'no_grow' / f"{stem}_slopeunits_grass.tif"
+        run_grass_slopeunits(
+            args.DEM_path, slu_tif,
+            thresh=args.slope_unit_thresh, areamin=args.slope_unit_areamin,
+            cvmin=args.slope_unit_cvmin, rf=args.slope_unit_rf,
+            maxiter=args.slope_unit_maxiter,
+            optimize=bool(int(args.slope_unit_optimize)),
+            cvmin_range=f"{args.slope_unit_cvmin_min},{args.slope_unit_cvmin_max}",
+            areamin_range=f"{args.slope_unit_areamin_min},{args.slope_unit_areamin_max}",
+            epsilonx=args.slope_unit_opt_epsx, epsilony=args.slope_unit_opt_epsy)
+        units_grass = read_units(slu_tif)
+        if units_grass.shape != Z.shape:
+            raise SystemExit(
+                f"[shape mismatch] GRASS slope-unit raster {units_grass.shape} "
+                f"!= DEM {Z.shape}")
+        rv = nogrow_from_units(units_grass, Z)
+        nogrow_io = rv.nogrow_io
+        nogrow_idx = rv.nogrow_idx
+        nogrow_i = rv.nogrow_i
+        nogrow_j = rv.nogrow_j
+        ridge_io = rv.ridge_io
+        valley_io = rv.valley_io
+        n_units = int(np.unique(units_grass[units_grass > 0]).size)
+        print(f"  done in {time.time()-t_rv:.1f}s "
+              f"({int(nogrow_io.sum())} no-grow cells, {n_units} units)",
+              flush=True)
+        from scipy.io import savemat
+        ng_save = REPO_ROOT / 'lib' / 'no_grow' / \
+            f"{stem}_no_grow_slopeunits_grass.mat"
+        ng_save.parent.mkdir(parents=True, exist_ok=True)
+        savemat(str(ng_save), {
+            'nogrow_io': nogrow_io.astype(np.uint8),
+            'nogrow_idx': nogrow_idx.astype(np.float64),
+            'nogrow_i': nogrow_i.astype(np.float64),
+            'nogrow_j': nogrow_j.astype(np.float64),
+            'ridge_io': ridge_io.astype(np.uint8),
+            'valley_io': valley_io.astype(np.uint8),
+        })
+        print(f"  saved: {ng_save.relative_to(REPO_ROOT).as_posix()}", flush=True)
+        # GRASS output is already a complete, connected partition -> polygonise
+        # directly (no clean / complete-partition pass needed).
+        if bool(int(args.slope_unit_save_shp)):
+            from region3d.vectorize import write_units_vector
+            ext = args.slope_unit_shp_format
+            if not ext.startswith('.'):
+                ext = '.' + ext
+            su_save = REPO_ROOT / 'lib' / 'no_grow' / \
+                f"{stem}_no_grow_slopeunits_grass_units{ext}"
+            write_units_vector(
+                units_grass, georef.transform, georef.crs, su_save,
+                min_cells=int(args.slope_unit_shp_min_cells),
+                clip_path=(args.slope_unit_shp_clip or None),
+                clip_invert=bool(int(args.slope_unit_shp_clip_invert)),
+                to_wgs84=bool(int(args.slope_unit_shp_wgs84)))
+            print(f"  vector: {su_save.relative_to(REPO_ROOT).as_posix()}",
+                  flush=True)
     else:
         print(f"Loading no-grow zones: {args.no_grow_mat}")
+        _require_file(args.no_grow_mat, what='no-grow .mat')
         ng = load_no_grow(args.no_grow_mat)
         nogrow_io = ng['nogrow_io']
         nogrow_idx = ng['nogrow_idx']
@@ -354,6 +452,8 @@ def _run_impl(args):
         nogrow_j = ng['nogrow_j']
         ridge_io = ng['ridge_io']
         valley_io = ng['valley_io']
+        _require_shape(nogrow_io, Z.shape, what='no-grow mask',
+                       src=args.no_grow_mat)
 
     # ---- Shear strength parameters (driver.m lines 414-421) ----------------
     if args.soil_strength_mode == 2:
@@ -366,6 +466,7 @@ def _run_impl(args):
         prob_coh = np.array([float(args.coh_uniform)], dtype=np.float64)
     else:
         print(f"Loading shear strength parameter distribution: {args.shear_strength_mat}")
+        _require_file(args.shear_strength_mat, what='shear-strength .mat')
         ss = load_shear_strength(args.shear_strength_mat)
         prob = ss['prob']
         prob_phi = ss['prob_phi']
@@ -501,7 +602,20 @@ def main():
     if missing:
         p.error('missing conditionally-required arguments:\n  '
                 + '\n  '.join(missing))
-    run(args)
+    try:
+        run(args)
+    except SystemExit:
+        # Clean, already-formatted guard messages (_require_file/_require_shape
+        # etc.) — let them through without a confusing traceback.
+        raise
+    except Exception as e:
+        import traceback
+        print("\n" + "=" * 72, flush=True)
+        print(f"[error] {type(e).__name__}: {e}", flush=True)
+        print("=" * 72, flush=True)
+        print("Full traceback below (for debugging):", flush=True)
+        traceback.print_exc()
+        sys.exit(1)
 
 
 if __name__ == '__main__':

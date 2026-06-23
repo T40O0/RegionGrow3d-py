@@ -424,11 +424,11 @@ Key options:
 | `--soil_depth_source mat\|compute` | `mat` | load .mat / compute in Python |
 | `--soil_depth_mat PATH` | `lib/soil_depth/<DEM_stem>_soil_depth.mat` | source path when source=mat |
 | `--nogrow_mode 0\|1` | `1` | 0=off / 1=ridge+valley |
-| `--nogrow_source mat\|compute` | `mat` | same idea |
+| `--nogrow_source mat\|compute\|grass` | `mat` | `grass` = original r.slopeunits (Docker) |
 | `--no_grow_mat PATH` | `lib/no_grow/<DEM_stem>_no_grow.mat` | source path when source=mat |
 | `--ridge_acc_thresh FLOAT` | `5` | flow-accumulation threshold for ridges (`compute`) |
 | `--valley_acc_thresh FLOAT` | `100` | same for valleys (`compute`) |
-| `--slope_unit_nested 0\|1` | `1` | `slopeunits`: `1` = v2.0 (per-unit local subdivision, parent/depth tracked, **default**) / `0` = v1.0 — see §5.4 |
+| `--slope_unit_thresh/areamin/cvmin/rf/maxiter` | 500000/100000/0.3/2/50 | r.slopeunits params for `grass` — see §5.4 |
 | `--soil_strength_mode 1\|2` | `1` | 1=distribution / 2=uniform |
 | `--phi_uniform FLOAT` | `25` | uniform φ' [deg] |
 | `--coh_uniform FLOAT` | `2` | uniform c' [kPa] |
@@ -516,47 +516,57 @@ algorithm is chosen via `nogrow_source`.
 |---|---|---|
 | **`mat`** | Load existing `.mat` | reuse a MATLAB-side or previous Python run (seconds) |
 | **`compute`** | Acc-threshold ridges + valleys (TopoToolbox-style) | D8 flow → accumulation; cells with `acc > valley_acc_thresh` are valleys, cells with high acc on the inverted DEM (`acc > ridge_acc_thresh`) are ridges; thin to 1-pixel lines |
-| **`slopeunits`** | Slope units (Alvioli 2016/2025) | D8 with fill preprocessing → half-basins (left/right banks become distinct units) → iterative refinement by aspect circular variance → merge units below `areamin` (`r.slopeunits.clean` equivalent) → unit boundaries become no-grow |
+| **`grass`** | Slope units — original GRASS r.slopeunits (Alvioli 2016/2020) | runs `r.slopeunits.create` (MFD by default) → `r.slopeunits.clean` (removes units below the minimum area) → complete slope-unit partition → unit boundaries become no-grow. **Requires the GRASS-enabled Docker image.** |
 
-Main parameters of the `slopeunits` mode (UI / CLI):
+> The former `slopeunits` source (a pure-Python approximation of the upstream
+> algorithm) has been removed: it diverged from the reference (ARI ≈ 0.35 on a
+> real DEM) and suffered from over-segmentation / holes / exclaves. For faithful
+> results, run the original via `grass`.
 
-| Parameter | Meaning | Typical |
+Main parameters of the `grass` mode (UI / CLI):
+
+| Parameter | Meaning (r.slopeunits) | Typical |
 |---|---|---|
-| `slope_unit_thresh` | initial channel-defining acc threshold [m²]; larger = sparser channels = larger units | 100,000–1,000,000 (default **500,000**) |
-| `slope_unit_areamin` | minimum unit area [m²]; smaller units are merged into the largest neighbour | 50,000–200,000 (default **100,000**) |
-| `slope_unit_cvmin` | aspect circular-variance ceiling (0–1); subdivision stops at or below this value | 0.25–0.5 (default **0.3**) |
-| `slope_unit_rf` | per-iteration threshold reduction factor: `thresh ← thresh × (1 − 1/rf)` | 2.0–3.0 |
-| `slope_unit_maxiter` | upper bound on refinement iterations | 3–10 |
-| `slope_unit_nested` | `1` = v2.0 (per-unit local subdivision) / `0` = v1.0 (global resegment) | `1` |
+| `slope_unit_thresh` | `thresh`: initial channel-defining acc threshold [m²] | 100,000–1,000,000 (default **500,000**) |
+| `slope_unit_areamin` | `areamin`: minimum unit area [m²]; also used as `clean`'s `cleansize` | 50,000–200,000 (default **100,000**) |
+| `slope_unit_cvmin` | `cvmin`: aspect circular-variance ceiling (0–1) | 0.25–0.5 (default **0.3**) |
+| `slope_unit_rf` | `rf`: per-iteration threshold reduction factor (rounded to int) | 2–3 (default **2**) |
+| `slope_unit_maxiter` | `maxiteration`: refinement-iteration cap (stops early on convergence) | 10–50 (default **50**) |
 
-#### v1.0 vs v2.0 refinement (`slope_unit_nested`)
+#### r.slopeunits toolset ↔ literature
 
-| Mode | Algorithm | Output |
-|---|---|---|
-| **v2.0** (`nested=1`, **default**) | Each split-target unit is re-segmented **locally**: flow routing is recomputed inside the parent's bounding box with cells outside the parent masked to NaN, so sub-units cannot leak across the parent boundary. | Hierarchical segmentation. `SlopeUnitResult.parent` and `SlopeUnitResult.depth` record the parent ID and refinement depth per unit. |
-| **v1.0** (`nested=0`) | Each iteration lowers the channel threshold and re-segments the whole DEM. Old IDs are kept outside split-target units; new IDs are adopted only inside. | Flat (single-level) segmentation. `parent` / `depth` are `None`. |
+The upstream r.slopeunits has four modules; this pipeline uses two:
 
-Functionally, v2.0 produces cleaner sub-unit boundaries near the parent
-edges (no leakage from neighbouring catchments) and exposes the explicit
-parent → child hierarchy for multi-scale analysis. v1.0 is faster (one
-flow-routing pass per iteration instead of one per split-target unit) and
-matches the original 2016 paper.
+| Module | Role | Used | Paper |
+|---|---|---|---|
+| **r.slopeunits.create** | delineation (half-basins + aspect-CV refinement; MFD default) | ✅ | Alvioli 2016 |
+| **r.slopeunits.clean** | merge/remove units below `cleansize` | ✅ | (cleanup) |
+| **r.slopeunits.metrics** | quality metric (V·I) | (via optimize) | Alvioli 2016 |
+| **r.slopeunits.optimize** | search optimal `cvmin`/`areamin` | △ optional | Alvioli 2016/2020 |
+
+- `create` produces **single-level (non-nested)** slope units — it has no
+  "nested" parameter.
+- **Important:** `create` alone does NOT enforce a minimum area (`areamin` only
+  stops subdivision), so a few-cell fragments survive. **`clean`
+  (`cleansize=areamin`)** removes them; the pipeline runs create → clean
+  automatically.
+
+##### `--slope_unit_optimize 1` (GUI "🎯 Optimize")
+
+Runs `r.slopeunits.optimize` to **auto-tune cvmin/areamin** via the morphometric
+objective **F = V·I** (Alvioli 2016) — **no landslide inventory** (`basin` is the
+auto-derived DEM footprint). It searches the given cvmin/areamin ranges (defaults
+cvmin∈[0.05,0.25], areamin∈[50000,200000]) to maximise F, then rebuilds the final
+map with create+clean at the optimal values. `thresh`/`rf`/`maxiter` stay fixed.
+Caveats: **very slow** (many create+clean+metrics runs — practical only on small
+representative areas); **requires a ≥ 1 m DEM** (metrics truncates the resolution
+to an integer, so a 0.5 m DEM gives `resolution=0` and fails — use create+clean
+with optimize OFF instead). Landslide polygons are not used by r.slopeunits.
 
 When to choose what:
 - **Reproduce MATLAB results** → `mat` (existing file) or `compute`
-- **Derive a hydrologically meaningful ridge/valley network from the DEM** → `compute`
-- **Partition the terrain into physiographic slope units (better for
-  landslide-susceptibility semantics) with hierarchical metadata** →
-  `slopeunits` (default, `nested=1`)
-- **Need the v1.0 flat (single-level) segmentation for speed or to match the
-  2016 paper exactly** → `slopeunits` with `--slope_unit_nested 0`
-
-Note: the `slopeunits` Python implementation is an approximation of GRASS
-GIS's `r.slopeunits` — it uses D8 (vs MFD upstream) and TopoToolbox half-basin
-seeding (vs `r.watershed` upstream), so pixel-level identity with GRASS is
-not guaranteed. The overall geometry of the boundaries matches. `nested=1`
-approximates the v2.0 (Alvioli et al. 2025) hierarchy idea; the automatic
-parameter optimisation from that paper is **not** ported (yet).
+- **Derive a ridge/valley network from the DEM without GRASS** → `compute`
+- **Faithful r.slopeunits slope units** → `grass` (Docker)
 
 ### 5.5 `seismic_mode`
 
@@ -578,7 +588,7 @@ The final PGA is multiplied by `pseudo_scaling`.
 |---|---|---|---|
 | **DEM (.tif)** | `lib/DEM/<name>.tif` | ✅ required | — (input data) |
 | **Soil depth .mat** | `lib/soil_depth/<DEM_stem>_soil_depth.mat` | mode=1 + source=mat | ✅ `--soil_depth_source compute` |
-| **No-grow .mat** | `lib/no_grow/<DEM_stem>_no_grow.mat` | mode=1 + source=mat | ✅ `--nogrow_source compute` or `slopeunits` |
+| **No-grow .mat** | `lib/no_grow/<DEM_stem>_no_grow.mat` | mode=1 + source=mat | ✅ `--nogrow_source compute` or `grass` |
 | **Shear-strength parameter distribution .mat** | `lib/soil_strength/shear_strength.mat` | strength_mode=1 | ⚠ **Built by the user from local soil-strength test data.** Schema: `prob[N], prob_phi[N], prob_coh[N]`, Σ prob = 1 |
 | **PGA TIFF** | anywhere (recommended `lib/seismic/`) | seismic=raster | — (external input) |
 

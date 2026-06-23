@@ -80,6 +80,8 @@ NO_GROW_DIR = REPO / 'lib' / 'no_grow'
 SOIL_STRENGTH_DIR = REPO / 'lib' / 'soil_strength'
 SEISMIC_DIR = REPO / 'lib' / 'seismic'
 SEISMIC_DIR.mkdir(parents=True, exist_ok=True)
+COASTLINE_DIR = REPO / 'lib' / 'coastline'
+COASTLINE_DIR.mkdir(parents=True, exist_ok=True)
 
 with st.sidebar.expander("📁 Input file placement guide", expanded=False):
     st.markdown(
@@ -228,22 +230,22 @@ if nogrow_mode == 1:
         "  No-grow algorithm",
         ["💾 Load pre-computed .mat",
          "🟰 Acc-threshold ridges + valleys (TopoToolbox-style)",
-         "🗺 Slope units (Alvioli 2016/2025)"],
+         "🟢 Slope units — GRASS r.slopeunits (reference)"],
         index=0, key='nogrow_source_radio', disabled=DIS,
-        help="All compute paths use D8 flow routing and save outputs to "
+        help="All compute paths save outputs to "
              "`lib/no_grow/<DEM>_no_grow*.mat` and (with save_intermediates) "
              "to GeoTIFF.\n\n"
-             "• Acc-threshold: classify cells as ridge/valley by flow-"
-             "accumulation thresholds on the regular and inverted DEM.\n"
-             "• Slope units: half-basins refined by aspect circular variance "
-             "(Alvioli et al. — approximated re-implementation of GRASS "
-             "r.slopeunits).")
+             "• Acc-threshold: ridge/valley by flow-accumulation thresholds.\n"
+             "• GRASS r.slopeunits: runs the original Alvioli algorithm via "
+             "GRASS (bundled in the Docker image). Output is a complete, "
+             "connected slope-unit partition; needs the GRASS-enabled "
+             "container (docker compose).")
     if nogrow_source_label.startswith('💾'):
         nogrow_source = 'mat'
     elif nogrow_source_label.startswith('🟰'):
         nogrow_source = 'compute'
     else:
-        nogrow_source = 'slopeunits'
+        nogrow_source = 'grass'
 
     # Defaults so the variables exist on every path
     ridge_acc_thresh = 5.0
@@ -252,8 +254,14 @@ if nogrow_mode == 1:
     slope_unit_areamin = 100000.0
     slope_unit_cvmin = 0.3
     slope_unit_rf = 2.0
-    slope_unit_maxiter = 10
-    slope_unit_nested = 1
+    slope_unit_maxiter = 50
+    slope_unit_save_shp = 1
+    slope_unit_shp_format = '.shp'
+    slope_unit_shp_clip = ''
+    slope_unit_shp_clip_invert = 0
+    slope_unit_optimize = 0
+    slope_unit_cvmin_min, slope_unit_cvmin_max = 0.05, 0.25
+    slope_unit_areamin_min, slope_unit_areamin_max = 50000.0, 200000.0
 
     if nogrow_source == 'mat':
         ng_files = sorted(NO_GROW_DIR.glob('*.mat')) \
@@ -282,49 +290,98 @@ if nogrow_mode == 1:
             key='valley_acc_thresh', disabled=DIS)
         st.sidebar.caption(
             "  Saved to `lib/no_grow/<DEM>_no_grow_python.mat` after the run.")
-    else:  # slopeunits
+    else:  # grass (GRASS r.slopeunits)
         slope_unit_thresh = st.sidebar.number_input(
             "  Initial channel threshold [m²]", 1000.0, 5_000_000.0, 500000.0,
             10000.0, key='slope_unit_thresh', disabled=DIS,
-            help="Channel cells are those with flow-accumulation area above "
-                 "this value. Lower = denser channel network = smaller units.")
-        slope_unit_areamin = st.sidebar.number_input(
-            "  Minimum unit area [m²]", 100.0, 5_000_000.0, 100000.0, 5000.0,
-            key='slope_unit_areamin', disabled=DIS,
-            help="Units smaller than 2·areamin are not subdivided further.")
-        slope_unit_cvmin = st.sidebar.slider(
-            "  Aspect CV ceiling (cvmin)", 0.0, 1.0, 0.3, 0.05,
-            key='slope_unit_cvmin', disabled=DIS,
-            help="Aspect circular variance threshold: units with CV ≤ cvmin "
-                 "are considered homogeneous and stop being subdivided. "
-                 "Lower = more aggressive refinement.")
-        slope_unit_rf = st.sidebar.slider(
-            "  Reduction factor (rf)", 1.5, 5.0, 2.0, 0.1,
+            help="r.slopeunits `thresh`. Channel-defining flow-accumulation "
+                 "area; lower = denser channel network = smaller units.")
+        slope_unit_rf = st.sidebar.number_input(
+            "  Reduction factor (rf)", 2, 10, 2, 1,
             key='slope_unit_rf', disabled=DIS,
-            help="Per iteration: thresh ← thresh · (1 − 1/rf). Larger = "
-                 "gentler refinement steps.")
+            help="r.slopeunits `rf` (integer). Per iteration: "
+                 "thresh ← thresh − thresh/rf. Larger = gentler steps. "
+                 "Manual example uses 2.")
         slope_unit_maxiter = st.sidebar.number_input(
-            "  Max refinement iterations", 1, 30, 10, 1,
-            key='slope_unit_maxiter', disabled=DIS)
-        slope_unit_nested_bool = st.sidebar.checkbox(
-            "  🪜 nested (v2.0 — per-unit local subdivision)",
-            value=True, key='slope_unit_nested', disabled=DIS,
-            help="ON (default): v2.0 — each split-target unit is re-segmented "
-                 "LOCALLY (flow routing recomputed inside the parent's "
-                 "bounding box with cells outside the parent masked out). "
-                 "Sub-units cannot leak across the parent boundary and the "
-                 "result carries parent/depth metadata. Approximate port of "
-                 "Alvioli et al. 2025 r.slopeunits v2.0.\n\n"
-                 "OFF: v1.0 — every refinement iteration lowers the channel "
-                 "threshold and re-segments globally, then adopts the new IDs "
-                 "only inside split-target units (faster, no hierarchy info, "
-                 "matches the 2016 paper).")
-        slope_unit_nested = 1 if slope_unit_nested_bool else 0
-        _v_label = "v2.0 nested" if slope_unit_nested else "v1.0"
-        st.sidebar.caption(
-            f"  ({_v_label}) Saved to "
-            f"`lib/no_grow/<DEM>_no_grow_slopeunits"
-            f"{'_nested' if slope_unit_nested else ''}.mat` after the run.")
+            "  Max refinement iterations", 1, 100, 50, 1,
+            key='slope_unit_maxiter', disabled=DIS,
+            help="Upper bound on the aspect-CV refinement loop. The loop stops "
+                 "early once no unit needs splitting, so a high value is safe. "
+                 "r.slopeunits' manual example uses 50.")
+        # Optimize toggle FIRST, so cvmin/areamin show as single values (off)
+        # or as search ranges (on) — never both.
+        slope_unit_optimize = 1 if st.sidebar.checkbox(
+            "  🎯 Optimize cvmin/areamin (r.slopeunits.optimize — slow)",
+            value=False, key='slope_unit_optimize', disabled=DIS,
+            help="Morphometric auto-tuning (Alvioli 2016 objective F = V·I; "
+                 "NO landslide inventory). Searches the ranges below to maximise "
+                 "F; thresh/rf/maxiter stay fixed. SLOW — runs "
+                 "create+clean+metrics many times (minutes on small DEMs, much "
+                 "longer on large ones).") else 0
+        if not slope_unit_optimize:
+            slope_unit_cvmin = st.sidebar.number_input(
+                "  Aspect CV ceiling (cvmin)", 0.0, 1.0, 0.3, 0.01,
+                format="%.2f", key='slope_unit_cvmin', disabled=DIS,
+                help="Aspect circular variance threshold: units with CV ≤ cvmin "
+                     "stop being subdivided. Lower = more refinement.")
+            slope_unit_areamin = st.sidebar.number_input(
+                "  Minimum unit area [m²]", 100.0, 5_000_000.0, 100000.0, 5000.0,
+                key='slope_unit_areamin', disabled=DIS,
+                help="r.slopeunits `areamin` / clean `cleansize`. Units below "
+                     "this are merged away.")
+        else:
+            st.sidebar.caption("  cvmin search range (literature 0.05–0.25)")
+            _cc1, _cc2 = st.sidebar.columns(2)
+            slope_unit_cvmin_min = _cc1.number_input(
+                "cvmin min", 0.0, 1.0, 0.05, 0.01, format="%.2f",
+                key='slope_unit_cvmin_min', disabled=DIS)
+            slope_unit_cvmin_max = _cc2.number_input(
+                "cvmin max", 0.0, 1.0, 0.25, 0.01, format="%.2f",
+                key='slope_unit_cvmin_max', disabled=DIS)
+            st.sidebar.caption("  areamin search range [m²] (literature 50,000–200,000)")
+            _ac1, _ac2 = st.sidebar.columns(2)
+            slope_unit_areamin_min = _ac1.number_input(
+                "areamin min", 1000.0, 5_000_000.0, 50000.0, 1000.0,
+                key='slope_unit_areamin_min', disabled=DIS)
+            slope_unit_areamin_max = _ac2.number_input(
+                "areamin max", 1000.0, 5_000_000.0, 200000.0, 1000.0,
+                key='slope_unit_areamin_max', disabled=DIS)
+        slope_unit_save_shp_bool = st.sidebar.checkbox(
+            "  🧩 Export slope units as polygons (vector)",
+            value=True, key='slope_unit_save_shp', disabled=DIS,
+            help="Also write each slope unit as a polygon (attributes: "
+                 "unit_id, n_cells, area_m2) to "
+                 "`lib/no_grow/<DEM>_no_grow_slopeunits_grass_units.<fmt>`. "
+                 "Downloadable from the Maps tab after the run.")
+        slope_unit_save_shp = 1 if slope_unit_save_shp_bool else 0
+        slope_unit_shp_format = st.sidebar.selectbox(
+            "  Vector format", ['.shp', '.geojson', '.gpkg'], index=0,
+            key='slope_unit_shp_format', disabled=DIS or not slope_unit_save_shp,
+            help="Shapefile (zipped on download) keeps EPSG:6675 natively. "
+                 "GeoJSON is single-file (use for web). GeoPackage is a single "
+                 "modern container.")
+        # Coastline clip: stop polygons at the shoreline using a land/sea vector
+        _clip_files = []
+        for _cext in ('*.shp', '*.geojson', '*.gpkg'):
+            _clip_files += sorted(COASTLINE_DIR.glob(_cext))
+        _clip_names = ['(none)'] + [f.name for f in _clip_files]
+        _clip_sel = st.sidebar.selectbox(
+            "  ✂ Clip to coastline (land/sea vector)", _clip_names, index=0,
+            key='slope_unit_shp_clip', disabled=DIS or not slope_unit_save_shp,
+            help="Optional. Place a land (or sea) polygon vector in "
+                 f"`{COASTLINE_DIR.relative_to(REPO).as_posix()}/` "
+                 "(.shp/.geojson/.gpkg). Slope-unit polygons are clipped to it "
+                 "so they stop at the shoreline. e.g. 国土数値情報 海岸線/行政区域.")
+        if _clip_sel == '(none)':
+            slope_unit_shp_clip = ''
+        else:
+            slope_unit_shp_clip = str(COASTLINE_DIR / _clip_sel)
+        slope_unit_shp_clip_invert = 1 if st.sidebar.checkbox(
+            "  ↪ the clip vector is SEA (subtract it)", value=False,
+            key='slope_unit_shp_clip_invert',
+            disabled=DIS or not slope_unit_save_shp or _clip_sel == '(none)',
+            help="OFF: the vector is LAND → keep the part inside it. "
+                 "ON: the vector is SEA → remove that part.") else 0
 else:
     ridge_acc_thresh = 5.0
     valley_acc_thresh = 100.0
@@ -332,8 +389,14 @@ else:
     slope_unit_areamin = 100000.0
     slope_unit_cvmin = 0.3
     slope_unit_rf = 2.0
-    slope_unit_maxiter = 10
-    slope_unit_nested = 1
+    slope_unit_maxiter = 50
+    slope_unit_save_shp = 1
+    slope_unit_shp_format = '.shp'
+    slope_unit_shp_clip = ''
+    slope_unit_shp_clip_invert = 0
+    slope_unit_optimize = 0
+    slope_unit_cvmin_min, slope_unit_cvmin_max = 0.05, 0.25
+    slope_unit_areamin_min, slope_unit_areamin_max = 50000.0, 200000.0
 
 # ---- 5. Seismic -------------------------------------------------------------
 seismic_mode = st.sidebar.radio(
@@ -471,7 +534,14 @@ def _build_cmd():
            '--slope_unit_cvmin', str(slope_unit_cvmin),
            '--slope_unit_rf', str(slope_unit_rf),
            '--slope_unit_maxiter', str(slope_unit_maxiter),
-           '--slope_unit_nested', str(slope_unit_nested),
+           '--slope_unit_save_shp', str(slope_unit_save_shp),
+           '--slope_unit_shp_format', str(slope_unit_shp_format),
+           '--slope_unit_shp_clip_invert', str(slope_unit_shp_clip_invert),
+           '--slope_unit_optimize', str(slope_unit_optimize),
+           '--slope_unit_cvmin_min', str(slope_unit_cvmin_min),
+           '--slope_unit_cvmin_max', str(slope_unit_cvmin_max),
+           '--slope_unit_areamin_min', str(slope_unit_areamin_min),
+           '--slope_unit_areamin_max', str(slope_unit_areamin_max),
            '--save_intermediates', '1',
            '--out_dir', out_root,
            ]
@@ -484,6 +554,8 @@ def _build_cmd():
                 str(SOIL_STRENGTH_DIR / 'shear_strength.mat')]
     if PGA_path:
         cmd += ['--PGA_path', PGA_path]
+    if slope_unit_shp_clip:
+        cmd += ['--slope_unit_shp_clip', slope_unit_shp_clip]
     if run_only != ALL_RUNS:
         cmd += ['--run-index', str(run_only)]
     return cmd
@@ -770,6 +842,45 @@ if out_dir and Path(out_dir).exists():
                     st.download_button(
                         label, data=p.read_bytes(), file_name=p.name,
                         mime='image/tiff', use_container_width=True)
+
+        # ---- Slope-unit polygons (vector) download ---------------------------
+        # The slope-unit vector is written to lib/no_grow/ next to the .mat,
+        # named "<DEM stem>_no_grow_slopeunits*_units.<ext>". Shapefiles are a
+        # multi-file set, so they are zipped on the fly before download.
+        import io
+        import zipfile
+        _SHP_SIDECARS = ('.shp', '.shx', '.dbf', '.prj', '.cpg', '.qpj')
+        dem_stem = Path(dem_name).stem if dem_name else ''
+        vec_files = []
+        if dem_stem:
+            for vext in ('.shp', '.geojson', '.gpkg'):
+                vec_files += sorted(NO_GROW_DIR.glob(
+                    f"{dem_stem}_no_grow_slopeunits*_units{vext}"))
+        if vec_files:
+            st.markdown("**🧩 Slope-unit polygons**")
+            vcols = st.columns(min(len(vec_files), 3) or 1)
+            for col, vp in zip(vcols, vec_files):
+                with col:
+                    if vp.suffix.lower() == '.shp':
+                        buf = io.BytesIO()
+                        with zipfile.ZipFile(buf, 'w',
+                                             zipfile.ZIP_DEFLATED) as zf:
+                            for side in vp.parent.glob(vp.stem + '.*'):
+                                if side.suffix.lower() in _SHP_SIDECARS:
+                                    zf.write(side, arcname=side.name)
+                        st.download_button(
+                            f"⬇ {vp.stem}.zip (SHP)", data=buf.getvalue(),
+                            file_name=vp.stem + '.zip',
+                            mime='application/zip',
+                            use_container_width=True, key=f"dl_{vp.name}")
+                    else:
+                        mime = ('application/geo+json'
+                                if vp.suffix.lower() == '.geojson'
+                                else 'application/octet-stream')
+                        st.download_button(
+                            f"⬇ {vp.name}", data=vp.read_bytes(),
+                            file_name=vp.name, mime=mime,
+                            use_container_width=True, key=f"dl_{vp.name}")
 
     with tab_stats:
         if sus_path.exists():

@@ -19,13 +19,28 @@ python/output_*
 # Reference papers (ship separately)
 reference
 
-# Sample data — should be mounted at run-time, not baked in
-lib/DEM/*.tif
-lib/DEM/*.tiff
+# Sample data & derived artefacts — mounted at run-time, never baked in
+lib/**/*.tif
+lib/**/*.tiff
+lib/**/*.tfw
 lib/**/*.mat
-lib/soil_depth/*.tif
+lib/**/*.shp
+lib/**/*.shx
+lib/**/*.dbf
+lib/**/*.prj
+lib/**/*.cpg
+lib/**/*.qpj
+lib/**/*.gpkg
+lib/**/*.geojson
+lib/**/*.pdf
+lib/**/*.pptx
+lib/**/*.zip
+lib/**/*.xml
 post_processing/**/*.tif
 post_processing/**/*.mat
+
+# Local scratch / diagnostic scripts (not part of the shipped pipeline)
+python/_*.py
 
 # Tests are not needed for container runtime
 python/tests

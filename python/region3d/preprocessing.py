@@ -355,12 +355,144 @@ def _imreconstruct(marker: np.ndarray, mask: np.ndarray, conn: int = 8) -> np.nd
             m = new
 
 
+if _HAVE_NUMBA:
+    @numba.njit(cache=True, fastmath=False)
+    def _fillsinks_priority_flood(filled, m, n):
+        """In-place 8-connected depression fill (Barnes 2014 Priority-Flood).
+
+        `filled` is the elevation grid (float32, C-order, ravelled) with NaN at
+        nodata cells. Produces the SAME result as 8-connected greyscale
+        morphological reconstruction (skimage `reconstruction`) used by
+        `_imreconstruct`, because both compute the unique depression-less
+        surface where every cell is raised to its lowest spill (pour-point)
+        elevation. The filled value of any cell is always an *existing* input
+        elevation propagated by max(), so no new floating-point values are
+        created and the two methods agree bit-for-bit (float32 widened to
+        float64 is exact).
+
+        Memory is O(N): the elevation grid plus a bool `closed` mask and a
+        binary min-heap of (elevation, index) — a few GB at 1.2e8 cells versus
+        the ~20 GB skimage `rank_order` peak.
+        """
+        N = m * n
+        closed = np.zeros(N, dtype=np.bool_)
+        heap_e = np.empty(N, dtype=np.float32)
+        heap_i = np.empty(N, dtype=np.int64)
+        hs = 0  # heap size
+
+        # ---- Seed the heap with boundary outlet cells ----------------------
+        # A valid cell is an outlet if it touches the array edge or any NaN
+        # (8-connected). NaN cells are pre-closed and never processed.
+        for idx in range(N):
+            e = filled[idx]
+            if e != e:  # NaN
+                closed[idx] = True
+                continue
+            i = idx // n
+            j = idx - i * n
+            is_boundary = (i == 0) or (i == m - 1) or (j == 0) or (j == n - 1)
+            if not is_boundary:
+                # check 8 neighbours for NaN
+                for di in range(-1, 2):
+                    for dj in range(-1, 2):
+                        if di == 0 and dj == 0:
+                            continue
+                        nb = (i + di) * n + (j + dj)
+                        if filled[nb] != filled[nb]:  # neighbour is NaN
+                            is_boundary = True
+            if is_boundary:
+                # push (e, idx); sift up
+                heap_e[hs] = e
+                heap_i[hs] = idx
+                c = hs
+                hs += 1
+                while c > 0:
+                    p = (c - 1) >> 1
+                    if heap_e[p] <= heap_e[c]:
+                        break
+                    te = heap_e[p]; heap_e[p] = heap_e[c]; heap_e[c] = te
+                    ti = heap_i[p]; heap_i[p] = heap_i[c]; heap_i[c] = ti
+                    c = p
+                closed[idx] = True
+
+        # ---- Drain: pop lowest spill, raise neighbours ---------------------
+        while hs > 0:
+            ce = heap_e[0]
+            ci = heap_i[0]
+            # pop: move last to root, sift down
+            hs -= 1
+            heap_e[0] = heap_e[hs]
+            heap_i[0] = heap_i[hs]
+            c = 0
+            while True:
+                l = 2 * c + 1
+                r = l + 1
+                sm = c
+                if l < hs and heap_e[l] < heap_e[sm]:
+                    sm = l
+                if r < hs and heap_e[r] < heap_e[sm]:
+                    sm = r
+                if sm == c:
+                    break
+                te = heap_e[sm]; heap_e[sm] = heap_e[c]; heap_e[c] = te
+                ti = heap_i[sm]; heap_i[sm] = heap_i[c]; heap_i[c] = ti
+                c = sm
+
+            i = ci // n
+            j = ci - i * n
+            for di in range(-1, 2):
+                ii = i + di
+                if ii < 0 or ii >= m:
+                    continue
+                for dj in range(-1, 2):
+                    if di == 0 and dj == 0:
+                        continue
+                    jj = j + dj
+                    if jj < 0 or jj >= n:
+                        continue
+                    nb = ii * n + jj
+                    if closed[nb]:
+                        continue
+                    ne = filled[nb]
+                    if ne != ne:  # NaN (already closed normally, guard anyway)
+                        closed[nb] = True
+                        continue
+                    if ne < ce:
+                        ne = ce
+                        filled[nb] = ne
+                    closed[nb] = True
+                    # push (ne, nb)
+                    heap_e[hs] = ne
+                    heap_i[hs] = nb
+                    cc = hs
+                    hs += 1
+                    while cc > 0:
+                        pp = (cc - 1) >> 1
+                        if heap_e[pp] <= heap_e[cc]:
+                            break
+                        te = heap_e[pp]; heap_e[pp] = heap_e[cc]; heap_e[cc] = te
+                        ti = heap_i[pp]; heap_i[pp] = heap_i[cc]; heap_i[cc] = ti
+                        cc = pp
+        return filled
+
+
 def fillsinks(Z: np.ndarray) -> np.ndarray:
     """Fill closed depressions in a DEM (MATLAB `fillsinks(DEM)` equivalent).
 
     Implements the single-argument branch of `fillsinks.m`: complement-and-
     morphologically-reconstruct, with -inf at NaN cells.
+
+    When Numba is available the O(N)-memory Priority-Flood path is used (it is
+    bit-for-bit equivalent to the skimage greyscale reconstruction but avoids
+    its ~20 GB peak on >1e8-cell grids). Otherwise it falls back to
+    `_imreconstruct`.
     """
+    if _HAVE_NUMBA:
+        m, n = Z.shape
+        filled = np.asarray(Z, dtype=np.float32).copy()
+        _fillsinks_priority_flood(filled.ravel(), m, n)
+        return filled.astype(np.float64)
+
     Z = np.asarray(Z, dtype=np.float64)
     Inan = np.isnan(Z)
     dem = Z.copy()

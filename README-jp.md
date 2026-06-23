@@ -119,7 +119,8 @@ RegionGrow3d-py/
 │     ├ bwmorph.py
 │     ├ matlab_compat.py
 │     ├ preprocessing.py
-│     ├ slopeunits.py
+│     ├ grass_slopeunits.py   # 本家 GRASS r.slopeunits ラッパー
+│     ├ vectorize.py          # スロープユニット→ポリゴン / 海岸線クリップ
 │     ├ runner.py
 │     └ io.py
 ├ docs/MANUAL-jp.md          # 詳細マニュアル (日本語)
@@ -148,7 +149,7 @@ RegionGrow3d-py/
 | `soil_depth.m`, `fillsinks.m`, `identifyflats.m`, `flowacc.m`, `ridgelines.m`, `valleys.m`, `FLOWobj.m`, `FLOWobjInv.m`, `GRIDobj.m`, `copy2GRIDobj.m` | `python/region3d/preprocessing.py` *(一部 TopoToolbox 由来 — `LICENSE` 参照)* |
 | `saveraster.m` + MATLAB `geotiffread` | `python/region3d/io.py` |
 | MATLAB `bwmorph`, `bwconncomp`, `bwboundaries` (Image Processing Toolbox) | `python/region3d/bwmorph.py`, `python/region3d/matlab_compat.py` |
-| *(新規 — MATLAB に対応元なし)* Alvioli 2016/2025 slope unit 分割 | `python/region3d/slopeunits.py` |
+| *(新規 — MATLAB に対応元なし)* 本家 GRASS r.slopeunits (Alvioli 2016/2020) でスロープユニット分割 | `python/region3d/grass_slopeunits.py` (Docker) |
 | *(新規 — MATLAB に対応元なし)* Streamlit UI 用永続化 manifest | `python/region3d/runner.py` |
 
 Python 側の各モジュールには docstring 冒頭に対応する MATLAB 関数名が
@@ -165,7 +166,7 @@ Python 側の各モジュールには docstring 冒頭に対応する MATLAB 関
 | `soil_depth_mode` | 1=Roering / 2=一様 | ✅ / ✅ |
 | `soil_strength_mode` | 1=分布 / 2=一様 | ✅ / ✅ |
 | `nogrow_mode` | 0=なし / 1=境界あり | ✅ / ✅ |
-| `nogrow_source` (mode=1 時) | mat / compute (acc-threshold) / slopeunits (Alvioli 2016/2025) | ✅ / ✅ / ✅ |
+| `nogrow_source` (mode=1 時) | mat / compute (acc-threshold) / grass (本家 r.slopeunits, Docker) | ✅ / ✅ / ✅ |
 | `seismic_mode` | off / uniform / raster | ✅ / ✅ / ✅ |
 | `root_mode` | uniform | ✅ |
 
@@ -231,7 +232,7 @@ Python 側の各モジュールには docstring 冒頭に対応する MATLAB 関
   geomorphological slope units with `r.slopeunits` v1.0 and their
   optimization for landslide susceptibility modeling.* Geoscientific
   Model Development, 9, 3975–3991.
-  (および `python/region3d/slopeunits.py` が参照している 2025 年版 r.slopeunits)
+  (本家 `r.slopeunits` を `nogrow_source=grass` で実行。Docker イメージに同梱)
 - Hungr, O. (1989). *An extension of Bishop's simplified method of slope
   stability analysis to three dimensions.* Géotechnique, 39(4), 559–562.
 - `shear_strength.mat` 作成用の姉妹リポジトリ:

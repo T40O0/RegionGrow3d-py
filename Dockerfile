@@ -47,7 +47,26 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
        libexpat1 \
        libgomp1 \
+       # --- GRASS GIS + build tools so g.extension can install r.slopeunits ---
+       grass-core \
+       grass-dev \
+       build-essential \
+       git \
     && rm -rf /var/lib/apt/lists/*
+
+# Install the r.slopeunits addon (reference slope-unit algorithm, Alvioli et
+# al.) into the image. On Linux g.extension builds it from the GRASS addons
+# source (the Windows precompiled-addon route 404s for some GRASS builds).
+# A throwaway temporary project hosts the g.extension call.
+RUN grass --tmp-location EPSG:4326 --exec \
+        g.extension extension=r.slopeunits operation=add
+
+# Patch an upstream bug in r.slopeunits.optimize: its cleanup() calls
+# `grass.utils.try_rmdir`, but the module only imports `grass.script as gs`
+# (NameError) and `grass.utils.try_rmdir` no longer exists in GRASS 8.4+.
+# Replace it with a stdlib shutil removal so the optimizer can run.
+RUN sed -i 's|grass\.utils\.try_rmdir(path)|__import__("shutil").rmtree(path, ignore_errors=True)|' \
+        /root/.grass8/addons/scripts/r.slopeunits.optimize
 
 # Copy the prefix-installed Python packages from the build stage
 COPY --from=build /install/prefix /usr/local

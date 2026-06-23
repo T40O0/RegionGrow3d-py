@@ -128,7 +128,8 @@ RegionGrow3d-py/
 │     ├ bwmorph.py
 │     ├ matlab_compat.py
 │     ├ preprocessing.py
-│     ├ slopeunits.py
+│     ├ grass_slopeunits.py   # GRASS r.slopeunits wrapper
+│     ├ vectorize.py          # slope-unit polygons / coastline clip
 │     ├ runner.py
 │     └ io.py
 ├ docs/MANUAL.md             # detailed manual (English)
@@ -157,7 +158,7 @@ RegionGrow3d-py/
 | `soil_depth.m`, `fillsinks.m`, `identifyflats.m`, `flowacc.m`, `ridgelines.m`, `valleys.m`, `FLOWobj.m`, `FLOWobjInv.m`, `GRIDobj.m`, `copy2GRIDobj.m` | `python/region3d/preprocessing.py` *(some TopoToolbox-derived; see `LICENSE`)* |
 | `saveraster.m` + MATLAB `geotiffread` | `python/region3d/io.py` |
 | MATLAB `bwmorph`, `bwconncomp`, `bwboundaries` (Image-Processing Toolbox) | `python/region3d/bwmorph.py`, `python/region3d/matlab_compat.py` |
-| *(new — no MATLAB counterpart)* Alvioli 2016/2025 slope-unit segmentation | `python/region3d/slopeunits.py` |
+| *(new — no MATLAB counterpart)* slope-unit segmentation via the original GRASS r.slopeunits (Alvioli 2016/2020) | `python/region3d/grass_slopeunits.py` (Docker) |
 | *(new — no MATLAB counterpart)* persistent run-state for the Streamlit UI | `python/region3d/runner.py` |
 
 The Python sources keep the MATLAB function name in their module docstring so
@@ -174,7 +175,7 @@ the lineage is traceable from the code as well.
 | `soil_depth_mode` | 1=Roering / 2=uniform | ✅ / ✅ |
 | `soil_strength_mode` | 1=distribution / 2=uniform | ✅ / ✅ |
 | `nogrow_mode` | 0=off / 1=on | ✅ / ✅ |
-| `nogrow_source` (when mode=1) | mat / compute (acc-threshold) / slopeunits (Alvioli 2016/2025) | ✅ / ✅ / ✅ |
+| `nogrow_source` (when mode=1) | mat / compute (acc-threshold) / grass (original r.slopeunits, Docker) | ✅ / ✅ / ✅ |
 | `seismic_mode` | off / uniform / raster | ✅ / ✅ / ✅ |
 | `root_mode` | uniform | ✅ |
 
@@ -249,7 +250,7 @@ for the function-level breakdown and reuse rules.
   geomorphological slope units with `r.slopeunits` v1.0 and their
   optimization for landslide susceptibility modeling.* Geoscientific
   Model Development, 9, 3975–3991.
-  (And the 2025 r.slopeunits revision used by `python/region3d/slopeunits.py`.)
+  (The original `r.slopeunits` is run via `nogrow_source=grass`, bundled in the Docker image.)
 - Hungr, O. (1989). *An extension of Bishop's simplified method of slope
   stability analysis to three dimensions.* Géotechnique, 39(4), 559–562.
 - Companion repository for building `shear_strength.mat`:

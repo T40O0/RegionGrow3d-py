@@ -409,11 +409,11 @@ python python/driver.py --help
 | `--soil_depth_source mat\|compute` | `mat` | .mat 読込 / Python 計算 |
 | `--soil_depth_mat PATH` | `lib/soil_depth/<DEM_stem>_soil_depth.mat` | mat ソース時の読込先 |
 | `--nogrow_mode 0\|1` | `1` | 0=なし / 1=尾根+谷 |
-| `--nogrow_source mat\|compute` | `mat` | 同上 |
+| `--nogrow_source mat\|compute\|grass` | `mat` | 同上 (`grass`=本家 r.slopeunits、Docker) |
 | `--no_grow_mat PATH` | `lib/no_grow/<DEM_stem>_no_grow.mat` | 同上 |
 | `--ridge_acc_thresh FLOAT` | `5` | 尾根の流量蓄積閾値 (`compute`) |
 | `--valley_acc_thresh FLOAT` | `100` | 谷の流量蓄積閾値 (`compute`) |
-| `--slope_unit_nested 0\|1` | `1` | `slopeunits`: `1` = v2.0 (ユニット毎局所分割、parent/depth 追跡、**デフォルト**) / `0` = v1.0 — §5.4 参照 |
+| `--slope_unit_thresh/areamin/cvmin/rf/maxiter` | 500000/100000/0.3/2/50 | `grass` の r.slopeunits パラメータ — §5.4 参照 |
 | `--soil_strength_mode 1\|2` | `1` | 1=分布 / 2=一様 |
 | `--phi_uniform FLOAT` | `25` | 一様 φ' [deg] |
 | `--coh_uniform FLOAT` | `2` | 一様 c' [kPa] |
@@ -496,43 +496,67 @@ mode=1 の `mw=0.5` は「土層厚の半分まで水で飽和」を意味しま
 
 | 値 | 名称 | 内容 |
 |---|---|---|
-| **`mat`** | 既存 .mat 読込 | MATLAB 由来または前回 Python 計算結果を再利用 (秒) |
+| **`mat`** | 既存 .mat 読込 | MATLAB 由来または前回計算結果を再利用 (秒) |
 | **`compute`** | acc-threshold ridges + valleys (TopoToolbox-style) | D8 流向→流量、`acc > valley_acc_thresh` (谷)、反転 DEM で `acc > ridge_acc_thresh` (尾根) を細線化 |
-| **`slopeunits`** | Slope units (Alvioli 2016/2025) | D8 + fill 前処理 → ハーフベイスン (左右両岸を別ユニット) → アスペクト円周分散で細分化 → 小ユニット併合 (`r.slopeunits.clean` 相当) → ユニット境界を no-grow に変換 |
+| **`grass`** | Slope units (本家 GRASS r.slopeunits, Alvioli 2016/2020) | 本家 `r.slopeunits.create`(MFD 既定)→ `r.slopeunits.clean`(最小面積で小ユニット除去)を実行 → 完全区分のスロープユニット → 境界を no-grow に変換。**GRASS 入り Docker イメージが必要** |
 
-`slopeunits` モードの主なパラメータ (UI/CLI):
+> 旧 `slopeunits`(本家アルゴリズムの純 Python 近似)は廃止しました。本家との一致度が低く
+> (実 DEM で ARI≈0.35)、過分割・穴・飛び地などの問題があったためです。忠実な結果は
+> 本家を直接動かす `grass` を使ってください。
 
-| パラメータ | 意味 | 典型値 |
+`grass` モードの主なパラメータ (UI/CLI):
+
+| パラメータ | 意味 (r.slopeunits) | 典型値 |
 |---|---|---|
-| `slope_unit_thresh` | 初期チャンネル閾値 [m²]。大きいほど流路網が疎、ユニットが大 | 100,000–1,000,000 (デフォルト **500,000**) |
-| `slope_unit_areamin` | 最小ユニット面積 [m²]。これ未満は隣接最大ユニットに併合 | 50,000–200,000 (デフォルト **100,000**) |
-| `slope_unit_cvmin` | アスペクト円周分散の上限 (0–1)。これ以下なら細分化停止 | 0.25–0.5 (デフォルト **0.3**) |
-| `slope_unit_rf` | 各反復の閾値縮小係数。`thresh ← thresh × (1 − 1/rf)` | 2.0–3.0 |
-| `slope_unit_maxiter` | 反復細分化の上限 | 3–10 |
-| `slope_unit_nested` | `1` = v2.0 (ユニット毎局所分割) / `0` = v1.0 (全域再セグメント) | `1` |
+| `slope_unit_thresh` | `thresh`: 初期チャンネル閾値 [m²]。大きいほど流路網が疎、ユニットが大 | 100,000–1,000,000 (デフォルト **500,000**) |
+| `slope_unit_areamin` | `areamin`: 最小ユニット面積 [m²]。細分化停止＋`clean` の `cleansize` に使用 | 50,000–200,000 (デフォルト **100,000**) |
+| `slope_unit_cvmin` | `cvmin`: アスペクト円周分散の上限 (0–1)。これ以下なら細分化停止 | 0.25–0.5 (デフォルト **0.3**) |
+| `slope_unit_rf` | `rf`: 各反復の閾値縮小係数 (整数に丸めて渡す) | 2–3 (デフォルト **2**) |
+| `slope_unit_maxiter` | `maxiteration`: 反復細分化の上限 (早期収束あり) | 10–50 (デフォルト **50**) |
 
-#### v1.0 と v2.0 の違い (`slope_unit_nested`)
+#### r.slopeunits ツールセットと文献の対応
 
-| モード | アルゴリズム | 出力 |
-|---|---|---|
-| **v2.0** (`nested=1`、**デフォルト**) | 分割対象ユニットを **局所的に** 再セグメント (親ユニットの bbox 内部だけで流向再計算、外側を NaN マスク)。サブユニットが親境界を越えて漏れない | 階層分割。`SlopeUnitResult.parent` と `SlopeUnitResult.depth` に親 ID と細分化深さを記録 |
-| **v1.0** (`nested=0`) | 反復毎にチャンネル閾値を下げて全域を再セグメント。分割対象ユニット内のみ新 ID を採用、それ以外は旧 ID 保持 | フラット (単一レベル) 分割。`parent` / `depth` は `None` |
+本家 r.slopeunits は 4 モジュール構成:
 
-機能的には v2.0 のほうが親境界付近のサブユニット境界が綺麗 (隣接流域からのリーク無し) で、
-parent → child の階層メタデータが取り出せます。v1.0 は高速 (反復毎に流向計算 1 回、v2.0
-は分割対象ユニット毎) で、2016 年論文に忠実です。
+| モジュール | 役割 | 使用 | 文献 |
+|---|---|---|---|
+| **r.slopeunits.create** | delineation 本体(ハーフベイスン＋アスペクト円周分散で細分化、MFD 既定) | ✅ | Alvioli 2016 |
+| **r.slopeunits.clean** | `cleansize` 未満のユニットを併合/除去 | ✅ | (後処理) |
+| **r.slopeunits.metrics** | 品質指標 (V·I) を計算 | (optimize 経由) | Alvioli 2016 |
+| **r.slopeunits.optimize** | `cvmin`/`areamin` を範囲探索して自動最適化 | △ オプション | Alvioli 2016/2020 |
+
+- create は**単一レベル(非 nested)**のスロープユニットを生成します(create に nested
+  パラメータは存在しません)。
+- **重要**: `create` 単体は最小面積を強制しません(areamin は細分化停止の閾値のみ)。
+  数セルの極小ユニットを消すには **`clean`(cleansize=areamin)** が必須で、本パイプラインは
+  create→clean を自動で連結します。
+
+##### `--slope_unit_optimize 1`(GUI「🎯 Optimize」)
+
+`r.slopeunits.optimize` による **cvmin/areamin の自動最適化**(地形ベースの目的関数
+**F = V·I**, Alvioli 2016)。**地すべりインベントリは不要**(`basin` は DEM 外形を自動生成)。
+`cvmin`/`areamin` の探索範囲(GUIで指定、文献既定 cvmin∈[0.05,0.25]・areamin∈[50000,200000])
+内で F を最大化し、得た最適値で create+clean を実行して最終マップを作ります。
+`thresh`/`rf`/`maxiter` は固定。
+
+注意:
+- **非常に遅い**(create+clean+metrics を多数回反復。小DEMで数分、実DEMで数時間規模)。
+  実用は**小さな代表領域で最適値を求め、本番に流用**するのが現実的。
+- **DEM は 1 m 以上必須**。metrics が解像度を整数に丸めるため、0.5 m DEM だと
+  `resolution=0` でエラーになります(0.5 m は optimize OFF の create+clean なら可)。
+- **地すべりポリゴンは r.slopeunits では使いません**(delineation は地形のみ)。インベントリは
+  下流の susceptibility 検証で使うものです。
+
+#### スロープユニットのベクタ出力 (SHP / GeoJSON / GPKG)
+
+`grass` 計算と同時に、斜面ユニットを**ポリゴン**で書き出せます(海岸線クリップ対応)。
+本家出力は完全区分(穴/飛び地なし)なので追加の穴埋めは不要です。詳細・GUI/CLI の
+使い方は **[スロープユニットのベクタ出力](slope_units_vector_ja.md)** を参照。
 
 選択指針:
 - **MATLAB 結果を再現したい** → `mat` (既存ファイル) または `compute`
-- **DEM だけで物理的に意味のある尾根/谷を出したい** → `compute`
-- **斜面を地形ユニットとして分割し、階層 (親 ID / 細分化深さ) メタデータが欲しい** → `slopeunits` (デフォルト、`nested=1`)
-- **v1.0 のフラット (単一レベル) 分割で十分、または 2016 年論文に厳密合わせたい** → `slopeunits` で `--slope_unit_nested 0`
-
-注: `slopeunits` の Python 実装は GRASS GIS `r.slopeunits` の本家アルゴリズムの近似で、
-流向計算は D8 (本家は MFD)、ハーフベイスンは TopoToolbox D8 + fill 前処理 (本家は
-`r.watershed`) を使うため、ピクセル単位で本家と一致はしません。境界の概形は一致します。
-`nested=1` は Alvioli et al. 2025 (r.slopeunits v2.0) の階層構造の考え方を近似実装したもので、
-同論文の自動パラメータ最適化 (automatic optimisation) は **未実装** です。
+- **DEM だけで簡易に尾根/谷を出したい(GRASS 不要)** → `compute`
+- **本家 r.slopeunits の忠実なスロープユニットが欲しい** → `grass`(Docker)
 
 ### 5.5 `seismic_mode`
 
@@ -554,7 +578,7 @@ parent → child の階層メタデータが取り出せます。v1.0 は高速 
 |---|---|---|---|
 | **DEM (.tif)** | `lib/DEM/<name>.tif` | ✅ 必須 | — (入力データ) |
 | **土層厚 .mat** | `lib/soil_depth/<DEM_stem>_soil_depth.mat` | mode=1 + source=mat 時 | ✅ `--soil_depth_source compute` で生成 |
-| **無成長帯 .mat** | `lib/no_grow/<DEM_stem>_no_grow.mat` | mode=1 + source=mat 時 | ✅ `--nogrow_source compute` または `slopeunits` で生成 |
+| **無成長帯 .mat** | `lib/no_grow/<DEM_stem>_no_grow.mat` | mode=1 + source=mat 時 | ✅ `--nogrow_source compute` または `grass` で生成 |
 | **せん断強度パラメータ分布 .mat** | `lib/soil_strength/shear_strength.mat` | strength_mode=1 時 | ⚠ **対象地盤の強度試験データから利用者が自作**。スキーマ: `prob[N], prob_phi[N], prob_coh[N]`、Σ prob = 1 |
 | **PGA TIFF** | 任意 (`lib/seismic/` 推奨) | seismic=raster 時 | — (外部入力) |
 
