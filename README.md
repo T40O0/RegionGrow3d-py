@@ -32,8 +32,11 @@ docker build -t region3d:latest .
 docker run --rm -p 8501:8501 \
   -v "$(pwd)/lib:/app/lib" \
   -v "$(pwd)/python/output:/app/python/output" \
+  -v "$(pwd)/python/output_webui:/app/python/output_webui" \
   region3d:latest
 ```
+(The `output_webui` mount is required — the Web UI writes its run outputs there;
+without it they go to an anonymous volume and won't persist on the host.)
 Or `docker compose up`. No local Python install needed; every native dependency
 is resolved inside the container, so this is the most reproducible option.
 See [docs/MANUAL.md](docs/MANUAL.md#22-docker) for details.

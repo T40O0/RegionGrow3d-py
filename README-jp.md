@@ -30,8 +30,11 @@ docker build -t region3d:latest .
 docker run --rm -p 8501:8501 \
   -v "$(pwd)/lib:/app/lib" \
   -v "$(pwd)/python/output:/app/python/output" \
+  -v "$(pwd)/python/output_webui:/app/python/output_webui" \
   region3d:latest
 ```
+(`output_webui` のマウントは必須 — Web UI は実行結果をここに書き出すため、
+省くと匿名ボリュームに入りホスト側に残りません。)
 または `docker compose up`。Python 環境構築不要、依存ライブラリも全てコンテナ内で
 解決されるので最も再現性が高い方法です。詳細: [docs/MANUAL.md](docs/MANUAL.md#22-docker)
 

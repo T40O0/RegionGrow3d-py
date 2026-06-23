@@ -43,6 +43,15 @@ post_processing/**/*.tif
 post_processing/**/*.tif.aux.xml
 post_processing/**/*.tif.ovr
 
+# Rendered figures bake in third-party basemap tiles and restricted
+# inventory/DEM data — do not commit.
+docs/img/
+
+# Site-specific analysis / visualization scratch scripts and the methodology
+# write-up — depend on restricted data and are not for publication.
+python/_*.py
+docs/nogrow_method_ja.md
+
 # Reference materials (third-party papers, shortcuts, MATLAB function specs).
 # Contents may include copyrighted PDFs (e.g. journal articles) — exclude
 # the whole folder from version control.
