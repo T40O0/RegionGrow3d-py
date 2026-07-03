@@ -142,10 +142,17 @@ def run_grass_slopeunits(dem, out_raster, *,
         if not _is_ascii(dem):
             dem_use = tmpdir / "dem_ascii.tif"
             shutil.copy(dem, dem_use)
+        # GRASS writes to an ASCII scratch path; we move it into place only on
+        # success. This (1) sidesteps the same non-ASCII-path problem the DEM
+        # copy above works around, and (2) guarantees a stale file from a
+        # previous run at out_raster can never masquerade as this run's result
+        # (the .bat wrapper GRASS uses on Windows can swallow nonzero exit
+        # codes, so "rc==0 and file exists" alone is not proof of success).
+        out_tmp = tmpdir / "slopeunits_out.tif"
         loc = tmpdir / "loc"
         args = [str(grass_bin), "-c", str(dem_use), str(loc), "--exec",
                 str(grass_python), str(_EXEC),
-                "--dem", str(dem_use), "--out", str(out_raster),
+                "--dem", str(dem_use), "--out", str(out_tmp),
                 "--thresh", str(thresh), "--areamin", str(areamin),
                 "--cvmin", str(cvmin), "--rf", str(rf),
                 "--maxiter", str(maxiter)]
@@ -171,11 +178,14 @@ def run_grass_slopeunits(dem, out_raster, *,
                                            "SLOPEUNITS_OPTIMIZED", "RSU via",
                                            "unavailable")):
                     print("  " + line.strip(), flush=True)
-        if proc.returncode != 0 or not out_raster.exists():
+        if proc.returncode != 0 or not out_tmp.exists():
             tail = (proc.stderr or proc.stdout or "")[-1500:]
             raise RuntimeError(
                 "GRASS r.slopeunits.create failed "
                 f"(rc={proc.returncode}).\n{tail}")
+        if out_raster.exists():
+            out_raster.unlink()
+        shutil.move(str(out_tmp), str(out_raster))
         return out_raster
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)

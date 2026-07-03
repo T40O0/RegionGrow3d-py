@@ -85,12 +85,53 @@ def read_last_completed(out_root: Path) -> Optional[Dict[str, Any]]:
 #  Process utilities (psutil preferred, with Windows/POSIX fallback)
 # =============================================================================
 
-def pid_alive(pid: Optional[int]) -> bool:
+def proc_create_time(pid: Optional[int]) -> Optional[float]:
+    """Return the process creation time (epoch seconds), or None if unknown.
+
+    Used to pin a PID to the *specific* process we launched so a recycled PID
+    (the OS reassigns a dead run's PID to an unrelated process) is not mistaken
+    for our run. Requires psutil; returns None when psutil is unavailable or the
+    process is gone.
+    """
+    if not pid:
+        return None
+    try:
+        import psutil
+        return psutil.Process(int(pid)).create_time()
+    except Exception:
+        return None
+
+
+def _identity_ok(pid: int, create_time: Optional[float]) -> bool:
+    """True if `pid`'s creation time matches `create_time` (within 2 s).
+
+    When create_time is None (caller didn't record it) or psutil is missing we
+    can't verify identity, so we don't block on it — bare existence is the
+    best available signal.
+    """
+    if create_time is None:
+        return True
+    try:
+        import psutil
+    except ImportError:
+        return True
+    try:
+        return abs(psutil.Process(pid).create_time() - float(create_time)) < 2.0
+    except Exception:
+        return False
+
+
+def pid_alive(pid: Optional[int], create_time: Optional[float] = None) -> bool:
+    """Whether `pid` is running AND (if create_time is given) is the same
+    process we launched — guards against PID reuse reconnecting to a stranger.
+    """
     if not pid:
         return False
     try:
         import psutil
-        return psutil.pid_exists(int(pid))
+        if not psutil.pid_exists(int(pid)):
+            return False
+        return _identity_ok(int(pid), create_time)
     except ImportError:
         pass
     if os.name == 'nt':
@@ -104,14 +145,24 @@ def pid_alive(pid: Optional[int]) -> bool:
     try:
         os.kill(int(pid), 0)
         return True
-    except (ProcessLookupError, PermissionError):
+    except ProcessLookupError:
         return False
+    except PermissionError:
+        # Process exists but is owned by another user — it IS alive.
+        return True
 
 
-def kill_pid(pid: Optional[int], timeout: float = 5.0) -> None:
+def kill_pid(pid: Optional[int], timeout: float = 5.0,
+             create_time: Optional[float] = None) -> None:
+    """Terminate `pid` and its child tree. If create_time is given, refuse to
+    kill unless the PID's creation time matches — never kill a recycled PID
+    that now belongs to an unrelated process.
+    """
     if not pid:
         return
     pid = int(pid)
+    if not _identity_ok(pid, create_time):
+        return
     try:
         import psutil
         try:

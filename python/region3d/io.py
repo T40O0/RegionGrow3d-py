@@ -56,7 +56,15 @@ def read_dem(path) -> tuple[np.ndarray, GeoRef]:
 
 
 def write_raster(path, arr: np.ndarray, georef: GeoRef, dtype: str = 'float32'):
-    """Write a single-band GeoTIFF mirroring the input grid."""
+    """Write a single-band GeoTIFF mirroring the input grid.
+
+    Masked cells in this pipeline are NaN, so for float outputs the nodata tag
+    is set to NaN (legal for float GeoTIFFs) — NOT inherited from the source
+    DEM. Previously the file advertised the source's nodata (e.g. -9999) while
+    the masked pixels were actually NaN, so tag-honouring readers (GDAL stats,
+    QGIS zonal tools) counted every masked cell as valid data. The pixels
+    themselves stay NaN, which is what gui.py's raw reads expect.
+    """
     arr = np.asarray(arr, dtype=dtype)
     profile = {
         'driver': 'GTiff',
@@ -68,7 +76,9 @@ def write_raster(path, arr: np.ndarray, georef: GeoRef, dtype: str = 'float32'):
         'transform': georef.transform,
         'compress': 'lzw',
     }
-    if not np.isnan(georef.nodata):
+    if np.issubdtype(arr.dtype, np.floating):
+        profile['nodata'] = float('nan')
+    elif not np.isnan(georef.nodata):
         profile['nodata'] = georef.nodata
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     with rasterio.open(path, 'w', **profile) as dst:

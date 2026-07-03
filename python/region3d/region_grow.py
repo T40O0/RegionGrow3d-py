@@ -46,7 +46,7 @@ def region_grow_fxn(Z, coh, phi, gam_w, gam_dry, gam_sat, Gs, W, sigma_s,
                     nogrow_mode, slope, aspect, dx, dy, nogrow_io, ridge_io,
                     valley_io, sus_i, susname, notnanidx, DEM_name, nogrow_i,
                     nogrow_j, root_mode, S_roots, S_roots_healthy, bs,
-                    *, verbose=True) -> RegionGrowResult:
+                    *, verbose=True, max_cell_offset=400) -> RegionGrowResult:
     """Run the RegionGrow3D algorithm. See `RegionGrowFxn.m` for the meanings of
     inputs/outputs. All raster inputs are 2D NumPy arrays with the same shape
     as Z; `*_idx` arguments are 1-based MATLAB column-major linear indices.
@@ -115,7 +115,15 @@ def region_grow_fxn(Z, coh, phi, gam_w, gam_dry, gam_sat, Gs, W, sigma_s,
     cluster_idx_eroded = [None] * num_objects
     cluster_idx_final = [None] * num_objects
 
-    err_percent_store = np.full((num_objects, max_growth_cycles), np.nan, dtype=np.float64)
+    # Width is max_growth_cycles+1: slot 0 is the pre-growth checkpoint and the
+    # final growth cycle (when growth_cycles reaches max_growth_cycles) writes
+    # slot max_growth_cycles, mirroring MATLAB's it_count(i)=max_growth_cycles+1
+    # (1-based) implicit-grow write at RegionGrowFxn.m:662. A row is NEVER
+    # cleared once a cluster starts — it persists across that cluster's
+    # boundary-expansion retries exactly like MATLAB's preallocated
+    # err_percent_store (allocated once at m:178, indexed per-cluster).
+    err_percent_store = np.full((num_objects, max_growth_cycles + 1), np.nan,
+                                dtype=np.float64)
 
     slides_initial_io = np.zeros(shape, dtype=bool)
     slides_eroded_io = np.zeros(shape, dtype=bool)
@@ -125,6 +133,12 @@ def region_grow_fxn(Z, coh, phi, gam_w, gam_dry, gam_sat, Gs, W, sigma_s,
     i = 0  # 0-based loop variable (MATLAB used 1..NumObjects)
     boundary_expand = 0
     cell_offset = 20
+    # `max_cell_offset` caps the local-window half-size (cells). Boundary
+    # expansion grows cell_offset by 20 each retry; without a ceiling a huge
+    # cluster can balloon the localized rasters indefinitely (memory blow-up /
+    # apparent hang). NOTE: MATLAB (RegionGrowFxn.m:697) retries unconditionally,
+    # so a capped cluster (terminate_reason=7) diverges from MATLAB output.
+    capped_clusters = 0
     diagnostics = {'terminate_reason': np.zeros(num_objects, dtype=np.int8),
                    'growth_cycles': np.zeros(num_objects, dtype=np.int32)}
 
@@ -150,7 +164,10 @@ def region_grow_fxn(Z, coh, phi, gam_w, gam_dry, gam_sat, Gs, W, sigma_s,
         set_F(cluster_io_full, cluster_idx_global, True)
         cluster_io = cluster_io_full
 
-        # Set boundary offset
+        # Set boundary offset. is_retry: we re-entered the SAME cluster after a
+        # boundary-expansion (the checkpoint stores below must persist across
+        # retries, matching MATLAB's once-allocated per-cluster rows).
+        is_retry = (boundary_expand == 1)
         if boundary_expand == 1:
             cell_offset += 20
             boundary_expand = 0
@@ -258,8 +275,14 @@ def region_grow_fxn(Z, coh, phi, gam_w, gam_dry, gam_sat, Gs, W, sigma_s,
 
         # Pre-size store as a list of None so that, like MATLAB's cell array,
         # we can write to a specific slot (and overwrite when the algorithm
-        # rolls back without incrementing it_count).
-        cluster_idx_loc_store = [None] * max_growth_cycles
+        # rolls back without incrementing it_count). It is allocated fresh only
+        # for a NEW cluster; on a boundary-expansion retry it persists (matching
+        # MATLAB's cluster_idx_loc_store, allocated once at m:177) so the
+        # end-of-cluster checkpoint pick can still see the previous attempt's
+        # stored clusters. Slot 0 is always overwritten with this attempt's
+        # eroded cluster (mirrors the m:436 write at it_count=1 each attempt).
+        if not is_retry:
+            cluster_idx_loc_store = [None] * (max_growth_cycles + 1)
         cluster_idx_loc_store[0] = cluster_idx_loc.copy()
         err_allow = (err_percent_allowable / 100.0) * cluster_W_sum
         cluster_W_sum_wedges = cluster_W_sum + float(np.nansum(wedge_W))
@@ -276,6 +299,7 @@ def region_grow_fxn(Z, coh, phi, gam_w, gam_dry, gam_sat, Gs, W, sigma_s,
         terminate_growth = False
         term_reason = 0
         growth_cycles = 0
+        growth_cycles_at_expand = 0  # cycles completed when a window-expand fired
         it_count = 0  # 0-based slot already used
 
         if reg_grow_on:
@@ -284,6 +308,9 @@ def region_grow_fxn(Z, coh, phi, gam_w, gam_dry, gam_sat, Gs, W, sigma_s,
                 add_cells_idx, _bio, _bidx, _bi, _bj, boundary_expand = \
                     downhill_dilate(loc.Z_loc, cluster_io_loc, cluster_elev, boundary_expand)
                 if boundary_expand == 1:
+                    # Remember the cycle count so the capped fall-through below
+                    # doesn't record growth_cycles=0 for a well-grown cluster.
+                    growth_cycles_at_expand = growth_cycles
                     growth_cycles = 0
                     continue
 
@@ -361,13 +388,21 @@ def region_grow_fxn(Z, coh, phi, gam_w, gam_dry, gam_sat, Gs, W, sigma_s,
                     # MATLAB sentinel (index 0) and anything after the optimum.
                     final_growth_list = growth_list[1:minerr_grow_idx + 1]
 
-                    # MATLAB: `err_percent_store(i,it_count(i)-1) <
-                    # err_percent_store(i,it_count(i))`. The current slot is
-                    # still NaN at this check (it gets written below), so the
-                    # comparison is always false. We mirror that explicitly so
-                    # the early-termination triggers only when growth_list is
-                    # empty.
-                    if len(final_growth_list) == 0:
+                    # MATLAB RegionGrowFxn.m:578-579:
+                    #   isempty(growth_list) || err_percent_store(i,it_count-1)
+                    #                            < err_percent_store(i,it_count)
+                    # The current slot (it_count) is written LATER this cycle
+                    # (below), so on a cluster's FIRST attempt it is still NaN
+                    # and the `<` is False. On a boundary-expansion RETRY the
+                    # row is not cleared, so slot it_count holds a stale finite
+                    # value from the previous (smaller-window) attempt and the
+                    # comparison can fire term_reason=3 (error increased vs the
+                    # prior attempt). NaN comparisons are False in NumPy too, so
+                    # this expression reproduces MATLAB on both first pass and
+                    # retry.
+                    err_increased = (err_percent_store[i, it_count - 1]
+                                     < err_percent_store[i, it_count])
+                    if len(final_growth_list) == 0 or err_increased:
                         terminate_growth = True
                         term_reason = 3
 
@@ -419,12 +454,12 @@ def region_grow_fxn(Z, coh, phi, gam_w, gam_dry, gam_sat, Gs, W, sigma_s,
                 err_x = err_x - Frx
                 err_y = err_y + Fry
 
-                if it_count < max_growth_cycles:
-                    # Slot assignment mirrors MATLAB cell-array indexing: when
-                    # the no-eligible branch rolls back without incrementing
-                    # it_count, this overwrites the previous slot rather than
-                    # appending — keeping `err_percent_store` and the cluster
-                    # store aligned for the post-loop argmin lookup.
+                if it_count <= max_growth_cycles:
+                    # Slot assignment mirrors MATLAB cell-array indexing. The
+                    # bound is inclusive so the final growth cycle (it_count ==
+                    # max_growth_cycles, i.e. MATLAB's it_count+1 slot) is
+                    # stored and can win the end-of-cluster nanargmin — matching
+                    # RegionGrowFxn.m:658-664.
                     cluster_idx_loc_store[it_count] = cluster_idx_loc.copy()
                     cluster_W_sum_wedges = cluster_W_sum + float(np.nansum(wedge_W))
                     if cluster_W_sum_wedges <= 0.0:
@@ -451,17 +486,39 @@ def region_grow_fxn(Z, coh, phi, gam_w, gam_dry, gam_sat, Gs, W, sigma_s,
                             cluster_idx_loc, loc.Z_loc, loc.W_loc, 0)
 
             if boundary_expand == 1:
-                continue  # re-do same i with bigger offset
+                # Re-do same cluster with a bigger local window — but cap the
+                # window so a pathological cluster can't expand without bound
+                # (runaway memory / apparent freeze). Beyond the cap, accept the
+                # current growth state instead of expanding further.
+                if cell_offset < max_cell_offset:
+                    # Do NOT clear err_percent_store[i, :] here: MATLAB keeps
+                    # the per-cluster row (and cluster_idx_loc_store row, kept
+                    # via `is_retry` above) across boundary-expansion retries,
+                    # so stale slots from the previous attempt remain visible to
+                    # the term_reason=3 comparison and the end-of-cluster
+                    # nanargmin. Clearing would diverge from RegionGrowFxn.m.
+                    continue
+                boundary_expand = 0
+                growth_cycles = growth_cycles_at_expand
+                term_reason = 7          # boundary-expansion capped
+                capped_clusters += 1
+                if verbose:
+                    print(f"  WARNING: cluster {i+1} hit the boundary-expansion "
+                          f"cap (cell_offset={cell_offset}); accepting truncated "
+                          f"growth (terminate_reason=7). Raise --max_cell_offset "
+                          f"to grow it fully.", flush=True)
 
         diagnostics['terminate_reason'][i] = term_reason
         diagnostics['growth_cycles'][i] = growth_cycles
 
-        # ---- Pick checkpoint with lowest percent error ----------------------
-        if not np.all(np.isnan(err_percent_store[i, :])):
-            best_cp = int(np.nanargmin(err_percent_store[i, :]))
-            stored = cluster_idx_loc_store[best_cp]
-            if stored is not None:
-                cluster_idx_loc = stored.copy()
+        # MATLAB (RegionGrowFxn.m:708-709) takes the CURRENT cluster_idx_loc as
+        # the final cluster; the lowest-percent-error checkpoint is only
+        # restored INSIDE the loop for term_reason 2 (no eligible cells) and 4
+        # (max cycles) — both handled above. For normal convergence and
+        # term_reason 3, MATLAB keeps the last-grown state, so we must NOT do a
+        # post-loop restore here (an earlier unconditional restore diverged from
+        # MATLAB on every normally-converged cluster whose row minimum was not
+        # the last slot).
 
         # ---- Map back to global coordinates --------------------------------
         loc_i_min = int(loc.loc_i.min())
@@ -486,6 +543,12 @@ def region_grow_fxn(Z, coh, phi, gam_w, gam_dry, gam_sat, Gs, W, sigma_s,
         set_F(cluster_io_full, cluster_idx_global, False)
 
         i += 1
+
+    if capped_clusters and verbose:
+        print(f"  WARNING: {capped_clusters} cluster(s) hit the boundary-"
+              f"expansion cap (max_cell_offset={max_cell_offset}); their growth "
+              f"was truncated (terminate_reason=7) and diverges from MATLAB "
+              f"there.", flush=True)
 
     return RegionGrowResult(
         slides_idx_initial=find_F(slides_initial_io),

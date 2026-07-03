@@ -76,7 +76,12 @@ def gradient_prince(Z: np.ndarray, x_cellsize: float, y_cellsize: float):
     cell = np.where(asp < 0, ninety - asp,
                     np.where(asp > ninety, three_sixty - asp + ninety,
                              ninety - asp)).astype(z32)
-    aspect_int = np.round(cell).astype(z32)
+    # MATLAB `round` rounds halves away from zero; np.round uses banker's
+    # rounding (half-to-even), which disagrees on exact x.5 values (e.g.
+    # 22.5 -> MATLAB 23 vs np.round 22). `cell` is aspect in [0, 360] (always
+    # non-negative), so floor(x + 0.5) reproduces MATLAB round exactly. NaN
+    # propagates through unchanged, matching np.round's NaN handling.
+    aspect_int = np.floor(cell + z32(0.5)).astype(z32)
 
     slope[1:m - 1, 1:n - 1] = slope_deg
     aspect[1:m - 1, 1:n - 1] = aspect_int

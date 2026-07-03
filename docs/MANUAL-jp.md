@@ -423,7 +423,9 @@ python python/driver.py --help
 | `--pseudo_scaling FLOAT` | `1.0` | PGA スケーリング |
 | `--S_roots FLOAT` | `10` | 根系強度 [kPa] |
 | `--save_intermediates 0\|1` | `1` | 1 で depth/nogrow/PGA/hillshade を TIFF 保存 |
-| `--run-index INT` | `4` | 単一ラン実行 (確率分布 mode のみ) |
+| `--run-index INT` | `None` | 0始まりの単一ランのみ計算し `<out>/<susname>/contribs/` に保存（低メモリ・レジューム、§4.4）。その run の部分 `sus_*.tif` も出力。`0 ≤ index < ラン数` 必須、`--aggregate` と排他 |
+| `--aggregate 0\|1` | `0` | `contribs/contrib_run*.npz` を合算して最終マップを書き終了。`--DEM_path` と `--test_no`/`--susname_override` のみで可。寄与が不完全/分布不一致ならエラー（§4.4） |
+| `--max_cell_offset INT` | `400` | 境界拡張時の局所窓の上限 [セル]。到達したクラスタは `terminate_reason=7` となり **MATLAB と乖離**（MATLABは無制限に再試行）、警告を出力。巨大クラスタを完全成長させたい場合は増やす |
 
 ### 4.3 実用例
 
@@ -453,6 +455,32 @@ python python/driver.py \
 強度試験データから `(prob, prob_phi, prob_coh)` を構築して
 `lib/soil_strength/shear_strength.mat` に保存。データを持たない場合は上記のように
 `soil_strength_mode 2` (一様 φ, c) で 1 ラン実行してください。
+
+### 4.4 低メモリ・レジューム (`--run-index` + `--aggregate`)
+
+確率分布ラン (`soil_strength_mode=1`) を大きな DEM で回すと、全ランを 1 プロセスで
+計算すると成長状態を同時にメモリ保持します。`--run-index`/`--aggregate` は各インデックス
+を別プロセスで計算し（1プロセス1成長＝低ピークメモリ）、後で合算します:
+
+```bash
+# 1. 各ランを個別プロセスで計算。各々が
+#    <out>/<susname>/contribs/contrib_run<NN>.npz を（全成果物の後に）保存するため、
+#    ファイルの存在＝そのインデックス完了。クラッシュ後の再実行で自動スキップされ安全。
+for N in 0 1 2 3 4 5 6 7 8 9; do
+  python python/driver.py $COMMON --run-index $N
+done
+
+# 2. 保存済み寄与を合算して最終 sus_<susname>_python.tif を書き出す。
+python python/driver.py --DEM_path <dem> --susname_override <susname> \
+  --out_dir <out> --aggregate 1
+```
+
+`--aggregate` は誤ったマップを書かないよう、インデックス欠落・重複、寄与間の分布サイズ
+不一致（別 `shear_strength.mat` の残骸）でエラーにし、確率合計が 1 でなければ警告します。
+各寄与はラン数と「スライドなし」フラグを記録し、一括ループの早期停止挙動を再現します。
+共有中間ラスタ（depth/nogrow/PGA/hillshade）は `--run-index 0` が一度だけ書き出します。
+
+> 能登 a20k 用のレジューム対応ループは `python/_sus_loop.sh`（GRASS Docker 内実行）にあります。
 
 ---
 
@@ -696,6 +724,25 @@ MATLAB 環境で参照 .tif を生成して同名パスに配置してくださ�
 ローカル `lib/driver.m` のみ 63 行差分 (パラメータ + `sigma_s_wedge` バグ修正)。
 関数群 33 ファイルは全て upstream と同一。
 
+### 8.3 既知の Python↔MATLAB 乖離
+
+本移植はピクセル完全一致を目標とします。以下は **意図的または追跡中**の差分です。
+変更した場合は MATLAB 参照を再生成して §8.1 を再実行してください:
+
+- **境界拡張の上限** (`--max_cell_offset`, 既定 400): MATLAB は窓拡張を無制限に
+  再試行。Python はメモリ/ハング対策で上限を設け、到達クラスタは
+  `terminate_reason=7` で成長打ち切り（クラスタ毎に警告）。厳密比較では上限を
+  大きく設定。
+- **alpha-shape 境界** (`alpha_shape_boundary`): 収縮係数→alpha の対応が MATLAB
+  `boundary()` の離散ランク選択ではなく外接円半径の線形補間。MATLAB fixture 未検証、
+  未解決のパリティ項目。
+- **根系補強** (`--S_roots > 0`): skip-slide 判定が現クラスタの `Q_mag` のみと比較
+  （MATLAB は事前確保行列全体と比較）。既定の production 設定 `S_roots=0`
+  (`F_roots=0`) では無効。
+
+`terminate_reason` コード: 0=収束, 2=成長候補なし, 3=誤差増加, 4=最大成長サイクル,
+5=幾何計算失敗, 6=退化(重み), 7=境界拡張の上限 (Python 固有)。
+
 ---
 
 ## 9. トラブルシューティング
@@ -720,11 +767,12 @@ streamlit run python/gui.py --server.port 8502
 
 ### 9.4 解析が遅い (フルランで 60 分超)
 - `--soil_strength_mode 2` で 1 ラン化 (10 分以内)
-- `--run-index 9` で最小ランのみ実行
+- `--run-index 9` で単一インデックスのみ計算（部分マップ出力＋寄与保存、`--aggregate` で合算 — §4.4）
 - `--soil_depth_mode 2` で土層厚計算を省略
 
 ### 9.5 メモリ不足
 DEM が 5000×5000 を超える場合は要 16+ GB。`cluster_io_full` バッファが m × n bool で確保されます。
+巨大 DEM の確率分布ランは §4.4 の `--run-index`/`--aggregate` 分割でピークメモリを下げられます。
 
 ### 9.6 [解析中] のままハング
 - ログを確認: `python/output/<susname>/` 配下に出力されます

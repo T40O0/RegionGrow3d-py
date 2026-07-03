@@ -438,7 +438,9 @@ Key options:
 | `--pseudo_scaling FLOAT` | `1.0` | PGA scaling factor |
 | `--S_roots FLOAT` | `10` | root strength [kPa] |
 | `--save_intermediates 0\|1` | `1` | also write depth/nogrow/PGA/hillshade TIFFs |
-| `--run-index INT` | `4` | run only a single distribution index (debug) |
+| `--run-index INT` | `None` | compute only one 0-based distribution index and bank it to `<out>/<susname>/contribs/` for later `--aggregate` (low-memory resume, see §4.4). Also writes that run's partial `sus_*.tif`. Must be `0 ≤ index < #runs`; mutually exclusive with `--aggregate` |
+| `--aggregate 0\|1` | `0` | combine all `contribs/contrib_run*.npz` into the final susceptibility map and exit; needs only `--DEM_path` + `--test_no`/`--susname_override`. Fails if the contribution set is incomplete or mixes distributions (see §4.4) |
+| `--max_cell_offset INT` | `400` | cap on the local-window half-size [cells] during boundary expansion. Clusters that hit it get `terminate_reason=7` and **diverge from MATLAB** (which retries unboundedly); a warning is printed. Raise it to grow very large clusters fully |
 
 ### 4.3 Examples
 
@@ -470,6 +472,37 @@ strength-test data.** For the distribution strength mode
 (`soil_strength_mode=1`), construct `(prob, prob_phi, prob_coh)` and save
 to `lib/soil_strength/shear_strength.mat`. If you have no data, fall back
 to the uniform-strength mode (`soil_strength_mode=2`) as shown above.
+
+### 4.4 Low-memory resume (`--run-index` + `--aggregate`)
+
+For a distribution run (`soil_strength_mode=1`) on a large DEM, computing all
+runs in one process holds the whole growth state in memory at once. The
+`--run-index`/`--aggregate` split runs each distribution index in its own
+process (one growth per process ⇒ low peak memory) and combines them afterward:
+
+```bash
+# 1. Compute each run in its own process. Each writes
+#    <out>/<susname>/contribs/contrib_run<NN>.npz (banked LAST, so its
+#    presence means "index NN is complete" — safe to resume after a crash).
+for N in 0 1 2 3 4 5 6 7 8 9; do
+  python python/driver.py $COMMON --run-index $N
+done
+
+# 2. Combine all banked contributions into the final sus_<susname>_python.tif.
+python python/driver.py --DEM_path <dem> --susname_override <susname> \
+  --out_dir <out> --aggregate 1
+```
+
+`--aggregate` refuses to write a misleading map: it errors if any index is
+missing, if indices are duplicated, or if the banked contributions disagree on
+the distribution size (stale files from a different `shear_strength.mat`), and
+warns if the probabilities do not sum to 1. Each contribution records the run
+count and a "no slides" flag so aggregation reproduces the monolithic loop's
+early-stop behavior. The shared intermediate rasters (depth/nogrow/PGA/
+hillshade) are written once, by `--run-index 0`.
+
+> A ready-made resume-safe loop for the Noto a20k case lives in
+> `python/_sus_loop.sh` (run inside the GRASS Docker image).
 
 ---
 
@@ -715,6 +748,30 @@ The (developer-only) `verify_against_upstream.py` script diffs the local
 `lib/driver.m` differs (63 lines — parameter changes plus a
 `sigma_s_wedge` initialisation patch). The 33 helper functions are identical.
 
+### 8.3 Known Python-vs-MATLAB divergences
+
+The port targets pixel-exact parity. The following are **intentional or
+tracked** differences; regenerate the MATLAB reference and re-run §8.1 after
+changing any of them:
+
+- **Boundary-expansion cap** (`--max_cell_offset`, default 400): MATLAB retries
+  window expansion unboundedly. Python caps it as a memory/hang safety valve;
+  a capped cluster gets `terminate_reason=7` and its growth is truncated. A
+  per-cluster warning is printed. Raise the cap (or set it very high) for a
+  strict comparison.
+- **Alpha-shape boundary** (`alpha_shape_boundary`): the shrink-factor→alpha
+  mapping is linear in circumradius rather than MATLAB `boundary()`'s discrete
+  rank selection. No MATLAB fixture currently validates this; treated as an
+  open parity item.
+- **Root reinforcement** (`--S_roots > 0`): the skip-slide test compares
+  `F_roots` against the current cluster's `Q_mag` only, whereas MATLAB compares
+  against its full preallocated matrix. Moot at the default production
+  `S_roots=0` (`F_roots=0`).
+
+`terminate_reason` codes in the diagnostics dict: 0=converged, 2=no eligible
+cells, 3=error increased, 4=max growth cycles, 5=geometry failure, 6=degenerate
+weight, 7=boundary-expansion cap (Python-only).
+
 ---
 
 ## 9. Troubleshooting
@@ -739,7 +796,7 @@ streamlit run python/gui.py --server.port 8502
 
 ### 9.4 Run is slow (full distribution > 60 min)
 - `--soil_strength_mode 2` reduces to one run (≤ 10 min)
-- `--run-index 9` runs only the smallest distribution index
+- `--run-index 9` computes only one distribution index (writes a partial map + banks a contribution; combine with `--aggregate` — see §4.4)
 - `--soil_depth_mode 2` skips soil-depth simulation
 
 ### 9.5 Memory pressure

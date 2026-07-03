@@ -35,6 +35,7 @@ Seismic options (driver.m lines 84-92, 295-313):
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import time
@@ -129,6 +130,10 @@ DEFAULTS = dict(
     soil_strength_mode=1,        # 1 = distribution (.mat) | 2 = uniform single (phi,c)
     phi_uniform=25.0,            # friction angle for uniform mode (deg)
     coh_uniform=2.0,             # cohesion for uniform mode (kPa)
+    # ---- Safety valve (Python-only; MATLAB retries unboundedly) ---------------
+    max_cell_offset=400,         # cap on the local-window half-size during boundary
+                                 # expansion (cells); capped clusters get
+                                 # terminate_reason=7 and diverge from MATLAB
 )
 
 
@@ -235,6 +240,19 @@ def _require_shape(arr, ref_shape, *, what, src):
             f"       PGA raster : provide a PGA GeoTIFF on the same grid as the DEM")
 
 
+def _write_sus_raster(sus, Z, georef, out_dir, susname):
+    """NaN-mask, scale to percent and write the susceptibility GeoTIFF.
+
+    Shared by the normal run path and --aggregate so masking/scaling/naming
+    live in one place and the two outputs cannot drift.
+    """
+    sus[np.isnan(Z)] = np.nan
+    out_path = out_dir / f"sus_{susname}_python.tif"
+    print(f"\nWriting susceptibility raster: {out_path}")
+    write_raster(out_path, sus * 100.0, georef)
+    return out_path
+
+
 def run(args):
     _set_keep_awake(True)
     try:
@@ -254,6 +272,89 @@ def _run_impl(args):
     Z = pad_DEM(Z)
     m, n = Z.shape
     print(f"  shape={Z.shape}, cellsize=({georef.x_cellsize}, {georef.y_cellsize})")
+
+    # Output naming — shared by the normal path, --run-index and --aggregate
+    # (deriving it once keeps the three modes pointing at the same directory).
+    if args.susname_override:
+        susname = str(args.susname_override).strip()
+    else:
+        susname = f"{int(args.test_no):05d}"
+    out_dir = Path(args.out_dir) / susname
+
+    # ---- Aggregate mode: combine saved per-run contributions, then exit ----
+    # (low-memory resume: each run is computed in its own process via
+    #  --run-index and saved to contribs/; here we sum them weighted by prob.)
+    if int(args.aggregate):
+        cdir = out_dir / 'contribs'
+        files = sorted(cdir.glob('contrib_run*.npz'))
+        if not files:
+            sys.exit(f"[aggregate] no contribution files found in {cdir}")
+        contribs = []
+        for f in files:
+            with np.load(f) as d:
+                if d['shape'].tolist() != list(Z.shape):
+                    sys.exit(f"[aggregate] shape mismatch in {f.name}: "
+                             f"{d['shape'].tolist()} vs {list(Z.shape)} — "
+                             f"contribution from a different DEM?")
+                contribs.append({
+                    'run': int(d['run']),
+                    'prob': float(d['prob']),
+                    'idx': d['idx'],
+                    'n_runs': int(d['n_runs']) if 'n_runs' in d.files else None,
+                    'no_slides': (bool(d['no_slides'])
+                                  if 'no_slides' in d.files else False),
+                })
+        contribs.sort(key=lambda c: c['run'])
+        # -- Completeness / staleness checks: a partial or mixed contribution
+        #    set would silently produce a wrong map under the canonical name.
+        runs = [c['run'] for c in contribs]
+        if len(set(runs)) != len(runs):
+            sys.exit(f"[aggregate] duplicate run indices in {cdir}: {runs}")
+        n_runs_set = {c['n_runs'] for c in contribs if c['n_runs'] is not None}
+        if len(n_runs_set) > 1:
+            sys.exit(f"[aggregate] contributions disagree on the distribution "
+                     f"size ({sorted(n_runs_set)}) — stale files from a "
+                     f"different shear-strength distribution in {cdir}?")
+        expected = n_runs_set.pop() if n_runs_set else max(runs) + 1
+        missing = sorted(set(range(expected)) - set(runs))
+        extra = sorted(set(runs) - set(range(expected)))
+        if missing or extra:
+            sys.exit(f"[aggregate] contribution set does not cover runs "
+                     f"0..{expected - 1}: missing={missing} extra={extra}\n"
+                     f"  -> compute the missing --run-index runs (or remove "
+                     f"stale files) before aggregating")
+        total_prob = sum(c['prob'] for c in contribs)
+        if abs(total_prob - 1.0) > 1e-6:
+            print(f"[aggregate] WARNING: probabilities sum to "
+                  f"{total_prob:.6f}, not 1.0 — stale or mismatched "
+                  f"contribution set?", flush=True)
+        sus = np.zeros(Z.shape, dtype=np.float32)
+        flat = sus.reshape(-1)              # C-order view (matches saved idx)
+        summary = []
+        n_used = 0
+        for c in contribs:
+            flat[c['idx']] += np.float32(c['prob'])
+            n_used += 1
+            sp = cdir / f"summary_run{c['run']:02d}.json"
+            if sp.exists():
+                with open(sp, encoding='utf-8') as fh:
+                    summary.append(json.load(fh))
+            print(f"  + run {c['run']+1}: prob={c['prob']:.4f} "
+                  f"cells={int(c['idx'].size)}")
+            if c['no_slides']:
+                # Mirror the monolithic loop: a run with no initial slides
+                # breaks the loop, so later runs contribute nothing.
+                print(f"  run {c['run']+1} had no slides — stopping here "
+                      f"(matches the monolithic loop's early break)")
+                break
+        out_path = _write_sus_raster(sus, Z, georef, out_dir, susname)
+        print(f"[aggregate] combined {n_used}/{len(files)} runs -> {out_path}")
+        if summary:
+            summary.sort(key=lambda r: r['run'])
+            with open(out_dir / 'run_summary.json', 'w', encoding='utf-8') as fh:
+                json.dump(summary, fh, indent=2)
+        print(f"Total elapsed: {(time.time()-t0)/60.0:.2f} min")
+        return
 
     print("Computing surface derivatives...")
     slope, aspect, dx, dy = gradient_prince(Z, georef.x_cellsize, georef.y_cellsize)
@@ -473,17 +574,21 @@ def _run_impl(args):
         prob_coh = ss['prob_coh']
         print(f"  {prob.size} runs, phi={prob_phi}, coh={prob_coh}, prob={prob}")
 
-    if args.susname_override:
-        susname = str(args.susname_override).strip()
-    else:
-        susname = f"{int(args.test_no):05d}"
-    out_dir = Path(args.out_dir) / susname
+    # Validate --run-index against the actual distribution BEFORE anything is
+    # written: an out-of-range index would otherwise bank a bogus empty
+    # contribution that a later --aggregate would silently ingest.
+    if args.run_index is not None and args.run_index >= prob.size:
+        sys.exit(f"[run-index] --run-index {args.run_index} is out of range: "
+                 f"the distribution has {prob.size} runs "
+                 f"(valid: 0..{prob.size - 1})")
+
     out_dir.mkdir(parents=True, exist_ok=True)
     print(f"Output directory: {out_dir}")
 
     # ---- Susceptibility runs ------------------------------------------------
     sus_map = np.zeros(Z.shape, dtype=np.float32)
     diagnostics_per_run = []
+    run_had_no_slides = False  # mirrors the MATLAB loop's early-break condition
 
     for sus_i in range(prob.size):
         if args.run_index is not None and sus_i != args.run_index:
@@ -515,23 +620,26 @@ def _run_impl(args):
             sus_i=sus_i + 1, susname=susname, notnanidx=notnanidx,
             DEM_name=Path(args.DEM_path).name, nogrow_i=nogrow_i, nogrow_j=nogrow_j,
             root_mode='uniform', S_roots=args.S_roots, S_roots_healthy=0.0,
-            bs=None, verbose=True,
+            bs=None, verbose=True, max_cell_offset=int(args.max_cell_offset),
         )
         diagnostics_per_run.append((sus_i, result.diagnostics))
         sus_map[result.slides_final_io] += float(prob[sus_i])
 
         if not result.cluster_idx_initial:
             print("  no slides for this run, breaking")
+            run_had_no_slides = True
             break
 
-    sus_map[np.isnan(Z)] = np.nan
+    out_path = _write_sus_raster(sus_map, Z, georef, out_dir, susname)
+    if args.run_index is not None:
+        print(f"  NOTE: single-run mode — this raster holds ONLY run "
+              f"{int(args.run_index) + 1}/{prob.size}; combine all runs with "
+              f"--aggregate 1")
 
-    out_path = out_dir / f"sus_{susname}_python.tif"
-    print(f"\nWriting susceptibility raster: {out_path}")
-    write_raster(out_path, sus_map * 100.0, georef)
-
-    # Optional intermediate rasters for the web UI / diagnostics
-    if int(args.save_intermediates):
+    # Optional intermediate rasters for the web UI / diagnostics. They are
+    # identical across runs, so in single-run fan-out mode only index 0 writes
+    # them (avoids N redundant hillshade computations).
+    if int(args.save_intermediates) and args.run_index in (None, 0):
         from region3d.derivatives import hillshade as _hillshade
         print("Writing intermediate rasters (depth/nogrow/PGA/hillshade)...")
         write_raster(out_dir / 'depth.tif', depth.astype(np.float32), georef)
@@ -555,9 +663,37 @@ def _run_impl(args):
                 'coh': float(prob_coh[sus_i]), 'prob': float(prob[sus_i]),
                 'n_clusters': n_clusters,
             })
-        import json
         with open(out_dir / 'run_summary.json', 'w', encoding='utf-8') as fh:
             json.dump(run_summary, fh, indent=2)
+
+    # ---- Single-run mode: bank this run's contribution for --aggregate ----
+    # Written LAST so the .npz appears only after every other artifact of this
+    # run — the resume loop treats its presence as "this index is complete".
+    if args.run_index is not None:
+        ri = int(args.run_index)  # validated above: 0 <= ri < prob.size
+        cdir = out_dir / 'contribs'
+        cdir.mkdir(parents=True, exist_ok=True)
+        if diagnostics_per_run:
+            idx = np.flatnonzero(result.slides_final_io).astype(np.int64)
+            n_clusters = int(result.diagnostics['terminate_reason'].size)
+        else:                                  # zero-probability run
+            idx = np.zeros(0, dtype=np.int64)
+            n_clusters = 0
+        np.savez_compressed(cdir / f"contrib_run{ri:02d}.npz",
+                            idx=idx, prob=np.float64(prob[ri]),
+                            run=np.int64(ri),
+                            shape=np.array(Z.shape, dtype=np.int64),
+                            n_runs=np.int64(prob.size),
+                            no_slides=np.bool_(run_had_no_slides))
+        with open(cdir / f"summary_run{ri:02d}.json", 'w',
+                  encoding='utf-8') as fh:
+            json.dump({'run': ri + 1, 'phi': float(prob_phi[ri]),
+                       'coh': float(prob_coh[ri]), 'prob': float(prob[ri]),
+                       'n_clusters': n_clusters, 'cells': int(idx.size)},
+                      fh, indent=2)
+        print(f"[run {ri+1}/{prob.size}] contribution banked -> "
+              f"contribs/contrib_run{ri:02d}.npz "
+              f"(cells={idx.size}, prob={float(prob[ri]):.4f})")
 
     print(f"Total elapsed: {(time.time()-t0)/60.0:.2f} min")
 
@@ -582,23 +718,36 @@ def main():
         else:
             p.add_argument(f'--{k}', type=type(v), default=v)
     p.add_argument('--run-index', type=int, default=None,
-                   help='Run only a single index from the shear-strength parameter distribution (0-based).')
+                   help='Run only a single index from the shear-strength parameter distribution (0-based). '
+                        'Saves that run to contribs/ for later --aggregate (low-memory resume).')
+    p.add_argument('--aggregate', type=int, default=0,
+                   help='Combine saved per-run contributions (contribs/*.npz) into the final '
+                        'susceptibility map and exit. Needs only --DEM_path + --test_no/--susname_override.')
     args = p.parse_args()
     if isinstance(args.rot_range, list):
         args.rot_range = tuple(args.rot_range)
+    if args.run_index is not None and args.run_index < 0:
+        p.error('--run-index must be >= 0 (0-based index into the '
+                'shear-strength distribution); negative values would silently '
+                'bank an empty contribution')
+    if int(args.aggregate) and args.run_index is not None:
+        p.error('--aggregate and --run-index are mutually exclusive: compute '
+                'each run first, then aggregate')
     # ---- Conditional-required validation ------------------------------------
+    # Aggregate mode only needs the DEM (for shape/georef) + the run name.
     missing = []
-    if args.soil_depth_mode == 1 and args.soil_depth_source == 'mat' \
-            and not args.soil_depth_mat:
-        missing.append('--soil_depth_mat is required when --soil_depth_mode=1 '
-                       'and --soil_depth_source=mat')
-    if args.nogrow_mode == 1 and args.nogrow_source == 'mat' \
-            and not args.no_grow_mat:
-        missing.append('--no_grow_mat is required when --nogrow_mode=1 and '
-                       '--nogrow_source=mat')
-    if args.soil_strength_mode == 1 and not args.shear_strength_mat:
-        missing.append('--shear_strength_mat is required when '
-                       '--soil_strength_mode=1')
+    if not int(args.aggregate):     # aggregate needs none of the input .mat files
+        if args.soil_depth_mode == 1 and args.soil_depth_source == 'mat' \
+                and not args.soil_depth_mat:
+            missing.append('--soil_depth_mat is required when --soil_depth_mode=1 '
+                           'and --soil_depth_source=mat')
+        if args.nogrow_mode == 1 and args.nogrow_source == 'mat' \
+                and not args.no_grow_mat:
+            missing.append('--no_grow_mat is required when --nogrow_mode=1 and '
+                           '--nogrow_source=mat')
+        if args.soil_strength_mode == 1 and not args.shear_strength_mat:
+            missing.append('--shear_strength_mat is required when '
+                           '--soil_strength_mode=1')
     if missing:
         p.error('missing conditionally-required arguments:\n  '
                 + '\n  '.join(missing))

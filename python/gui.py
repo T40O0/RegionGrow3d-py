@@ -25,6 +25,7 @@ PYTHON_EXE = sys.executable
 sys.path.insert(0, str(REPO / 'python'))
 
 from region3d.runner import (read_manifest, write_manifest, clear_manifest,
+                              proc_create_time,
                               read_last_completed, write_last_completed,
                               pid_alive, kill_pid, tail_log)
 
@@ -64,7 +65,8 @@ st.markdown(
 MANIFEST_ROOT = REPO / 'python' / 'output_webui'
 MANIFEST_ROOT.mkdir(parents=True, exist_ok=True)
 _manifest = read_manifest(MANIFEST_ROOT)
-IS_RUNNING = _manifest is not None and pid_alive(_manifest.get('pid'))
+IS_RUNNING = _manifest is not None and pid_alive(
+    _manifest.get('pid'), _manifest.get('create_time'))
 DIS = IS_RUNNING  # convenience alias
 
 st.sidebar.title("RegionGrow3D")
@@ -612,8 +614,36 @@ def _parse_progress_lines(lines):
     return state
 
 
+def _validate_inputs():
+    """Return a list of human-readable problems that would make the run fail
+    immediately. Checked BEFORE launching so we never spawn a doomed detached
+    subprocess (which would truncate the log and write a manifest for a run
+    that dies in <1 s)."""
+    problems = []
+    if not dem_name:
+        problems.append("No DEM selected — pick one in lib/DEM/ or upload a .tif.")
+    if soil_depth_mode == 1 and soil_depth_source == 'mat' and not soil_depth_mat:
+        problems.append("Soil-depth source is 'mat' but no soil-depth .mat is "
+                        "available — add one to lib/soil_depth/ or switch to "
+                        "'compute'/uniform.")
+    if nogrow_mode == 1 and nogrow_source == 'mat' and not no_grow_mat:
+        problems.append("No-grow source is 'mat' but no no-grow .mat is "
+                        "available — add one to lib/no_grow/ or switch to "
+                        "'compute'/'grass'.")
+    if soil_strength_mode == 1 and not (SOIL_STRENGTH_DIR / 'shear_strength.mat').exists():
+        problems.append("soil_strength_mode=1 needs "
+                        f"{(SOIL_STRENGTH_DIR / 'shear_strength.mat').as_posix()} "
+                        "— add it or use uniform (mode 2).")
+    return problems
+
+
 # ---- Start: spawn a detached subprocess and persist a manifest -------------
 if start and not IS_RUNNING:
+    _problems = _validate_inputs()
+    if _problems:
+        st.error("Cannot start — fix these first:\n\n"
+                 + "\n".join(f"- {p}" for p in _problems))
+        st.stop()
     cmd = _build_cmd()
     out_dir = Path(out_root) / susname
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -647,6 +677,7 @@ if start and not IS_RUNNING:
 
     write_manifest(MANIFEST_ROOT, {
         'pid': proc.pid,
+        'create_time': proc_create_time(proc.pid),  # pins the PID to THIS process
         'susname': susname,
         'out_root': str(out_root),
         'out_dir': str(out_dir),
@@ -666,9 +697,12 @@ if _manifest is not None:
     out_dir_active = Path(_manifest.get('out_dir', ''))
     start_time = float(_manifest.get('start_time', time.time()))
     elapsed = max(0.0, time.time() - start_time)
+    # Check liveness FIRST, then read the log: if we tailed the log first and
+    # the process finished in the gap, we'd miss the final "Total elapsed" line
+    # and misreport a successful run as a crash.
+    is_alive = pid_alive(_manifest.get('pid'), _manifest.get('create_time'))
     recent = tail_log(log_path, max_lines=25)
     state = _parse_progress_lines(recent)
-    is_alive = pid_alive(_manifest.get('pid'))
 
     if is_alive:
         # Big warning banner
@@ -687,7 +721,7 @@ if _manifest is not None:
         with header_cols[1]:
             if st.button("⏹ Stop", type="secondary",
                           use_container_width=True, key='stop_btn'):
-                kill_pid(_manifest.get('pid'))
+                kill_pid(_manifest.get('pid'), create_time=_manifest.get('create_time'))
                 clear_manifest(MANIFEST_ROOT)
                 st.session_state.last_status = ('error',
                                                   "⏹ Stopped by user")
@@ -890,17 +924,20 @@ if out_dir and Path(out_dir).exists():
             n_pos = int(((sus > 0) & valid).sum())
             n_50 = int(((sus >= 50) & valid).sum())
             n_90 = int(((sus >= 90) & valid).sum())
-            mean_sus = float(np.nanmean(sus))
             cs = 10.0  # cellsize hint
-            st.metric("Valid cells", f"{n_total:,}")
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("susceptibility > 0%", f"{n_pos:,}",
-                       f"{100*n_pos/n_total:.2f}%")
-            c2.metric("susceptibility ≥ 50%", f"{n_50:,}",
-                       f"{100*n_50/n_total:.2f}%")
-            c3.metric("susceptibility ≥ 90%", f"{n_90:,}",
-                       f"{100*n_90/n_total:.2f}%")
-            c4.metric("Mean susceptibility", f"{mean_sus:.2f}%")
+            if n_total == 0:
+                st.warning("Susceptibility raster has no valid (non-NaN) cells "
+                           "— nothing to summarise.")
+            else:
+                mean_sus = float(np.nanmean(sus))
+                def _pct(n):
+                    return f"{100*n/n_total:.2f}%"
+                st.metric("Valid cells", f"{n_total:,}")
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("susceptibility > 0%", f"{n_pos:,}", _pct(n_pos))
+                c2.metric("susceptibility ≥ 50%", f"{n_50:,}", _pct(n_50))
+                c3.metric("susceptibility ≥ 90%", f"{n_90:,}", _pct(n_90))
+                c4.metric("Mean susceptibility", f"{mean_sus:.2f}%")
             st.caption(
                 f"Estimated area: > 50% = {n_50 * cs * cs / 1e6:.3f} km², "
                 f"> 0% = {n_pos * cs * cs / 1e6:.3f} km² (assuming cs=10m)")

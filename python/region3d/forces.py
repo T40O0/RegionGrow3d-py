@@ -94,30 +94,44 @@ def interslice_force(subdx, subdy, x_cellsize, y_cellsize, coh, phi, W, sigma_s,
 def interslice_force_prism(wedge_subdx, wedge_subdy, wedge_width, wedge_r_avg,
                            wedge_W, wedge_phi, wedge_coh, wedge_U_pressure,
                            wedge_kW):
-    """Infinite-slope equilibrium per boundary prism (Taylor, 1948)."""
-    sx = np.asarray(wedge_subdx, dtype=np.float64)
-    sy = np.asarray(wedge_subdy, dtype=np.float64)
-    ww = np.asarray(wedge_width, dtype=np.float64)
-    wr = np.asarray(wedge_r_avg, dtype=np.float64)
-    W = np.asarray(wedge_W, dtype=np.float64)
-    phi = np.asarray(wedge_phi, dtype=np.float64)
-    coh = np.asarray(wedge_coh, dtype=np.float64)
-    Up = np.asarray(wedge_U_pressure, dtype=np.float64)
-    kW = np.asarray(wedge_kW, dtype=np.float64)
+    """Infinite-slope equilibrium per boundary prism (Taylor, 1948).
 
-    mag = np.sqrt(sx * sx + sy * sy)
-    ax = atand(sx)
-    ay = atand(sy)
-    a = atand(mag)
-    base_area = (ww * wr * np.sqrt(1.0 - (sind(ax) ** 2) * (sind(ay) ** 2))
-                 / (cosd(ax) * cosd(ay)))
+    Computed in float32 (rounding after each step, matching `interslice_force`
+    and MATLAB `Interslice_Force_Prism.m`, whose inputs are `single`). Was
+    previously float64 throughout, differing from MATLAB by ~1 ULP.
+    """
+    z32 = np.float32
+    sx = np.asarray(wedge_subdx, dtype=z32)
+    sy = np.asarray(wedge_subdy, dtype=z32)
+    ww = np.asarray(wedge_width, dtype=z32)
+    wr = np.asarray(wedge_r_avg, dtype=z32)
+    W = np.asarray(wedge_W, dtype=z32)
+    phi = np.asarray(wedge_phi, dtype=z32)
+    coh = np.asarray(wedge_coh, dtype=z32)
+    Up = np.asarray(wedge_U_pressure, dtype=z32)
+    kW = np.asarray(wedge_kW, dtype=z32)
 
-    U = Up * base_area
-    N = (W + U * sind(a) * tand(phi) - coh * base_area * sind(a)) \
-        / (cosd(a) + sind(a) * tand(phi))
-    Q = N * sind(a) - (coh * base_area + (N - U) * tand(phi)) * cosd(a) + kW
-    Q_x = (-sx / mag) * Q
-    Q_y = (-sy / mag) * Q
+    with np.errstate(invalid='ignore', divide='ignore'):
+        mag = np.sqrt(sx * sx + sy * sy).astype(z32)
+        ax = atand(sx).astype(z32)
+        ay = atand(sy).astype(z32)
+        a = atand(mag).astype(z32)
+        sax = sind(ax).astype(z32)
+        say = sind(ay).astype(z32)
+        cax = cosd(ax).astype(z32)
+        cay = cosd(ay).astype(z32)
+        sa = sind(a).astype(z32)
+        ca = cosd(a).astype(z32)
+        tp = tand(phi).astype(z32)
+
+        base_area = (ww * wr * np.sqrt(z32(1.0) - (sax * sax) * (say * say))
+                     / (cax * cay)).astype(z32)
+        U = (Up * base_area).astype(z32)
+        N = ((W + U * sa * tp - coh * base_area * sa)
+             / (ca + sa * tp)).astype(z32)
+        Q = (N * sa - (coh * base_area + (N - U) * tp) * ca + kW).astype(z32)
+        Q_x = ((-sx / mag) * Q).astype(z32)
+        Q_y = ((-sy / mag) * Q).astype(z32)
     return Q, Q_x, Q_y
 
 
@@ -170,16 +184,24 @@ def force_closure_interslice(rot, Q_x_cell, Q_y_cell, wedge_Q_x, wedge_Q_y,
 
 
 def project_slope(dx, dy, rot):
-    """Rotate (dx, dy) clockwise by `rot` degrees and return (slope, dx1, dy1)."""
-    dx = np.asarray(dx, dtype=np.float64)
-    dy = np.asarray(dy, dtype=np.float64)
-    theta0 = atan2d(dy, dx)
-    theta1 = rot + theta0
-    x1 = cosd(theta1)
-    y1 = sind(theta1)
-    a = np.sqrt(dx * dx + dy * dy)
-    b = a * cosd(rot)
-    dx1 = b * x1
-    dy1 = b * y1
-    slope = np.sqrt(dx1 * dx1 + dy1 * dy1)
-    return slope.astype(np.float32), dx1.astype(np.float32), dy1.astype(np.float32)
+    """Rotate (dx, dy) clockwise by `rot` degrees and return (slope, dx1, dy1).
+
+    Computed in float32 (rounding after each step, like `interslice_force`) to
+    match MATLAB `project_slope.m`, whose inputs subdx/subdy are `single`.
+    Previously the whole chain ran in float64 and was rounded only at return,
+    which differed from MATLAB by ~1 ULP and could flip near-tie rotation/growth
+    decisions downstream.
+    """
+    z32 = np.float32
+    dx = np.asarray(dx, dtype=z32)
+    dy = np.asarray(dy, dtype=z32)
+    theta0 = atan2d(dy, dx).astype(z32)
+    theta1 = (z32(rot) + theta0).astype(z32)
+    x1 = cosd(theta1).astype(z32)
+    y1 = sind(theta1).astype(z32)
+    a = np.sqrt(dx * dx + dy * dy).astype(z32)
+    b = (a * cosd(z32(rot))).astype(z32)
+    dx1 = (b * x1).astype(z32)
+    dy1 = (b * y1).astype(z32)
+    slope = np.sqrt(dx1 * dx1 + dy1 * dy1).astype(z32)
+    return slope, dx1, dy1
