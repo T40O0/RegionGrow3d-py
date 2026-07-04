@@ -95,6 +95,33 @@ if _HAVE_NUMBA:
                 R[ti] = a * b * c / (4.0 * area)
         return R
 
+    @_numba.njit(cache=True, fastmath=False)
+    def _alpha_shape_boundary_edges(keep_idx, simplices, neighbors, keep):
+        """Collect outward boundary half-edges (kept triangle -> non-kept
+        neighbour) in the SAME order as the reference Python loop: keep_idx
+        ascending, then k = 0, 1, 2 with (u, v) = (t[(k+1)%3], t[(k+2)%3]).
+        Returns parallel (u, v) int64 arrays."""
+        m = keep_idx.size
+        u = np.empty(m * 3, dtype=np.int64)
+        v = np.empty(m * 3, dtype=np.int64)
+        cnt = 0
+        for ii in range(m):
+            ti = keep_idx[ii]
+            t0 = simplices[ti, 0]
+            t1 = simplices[ti, 1]
+            t2 = simplices[ti, 2]
+            for k in range(3):
+                nb = neighbors[ti, k]
+                if nb < 0 or not keep[nb]:
+                    if k == 0:
+                        u[cnt] = t1; v[cnt] = t2
+                    elif k == 1:
+                        u[cnt] = t2; v[cnt] = t0
+                    else:
+                        u[cnt] = t0; v[cnt] = t1
+                    cnt += 1
+        return u[:cnt], v[:cnt]
+
 
 # ---- bwboundaries -------------------------------------------------------------
 # Moore-neighbor tracing with Jacob's stopping criterion, mirroring MATLAB's
@@ -273,6 +300,8 @@ def alpha_shape_boundary(X, Y, shrink_factor: float = 0.5):
     """
     from scipy.spatial import Delaunay, ConvexHull
 
+    from ._fastqhull import fast_qhull_tempfile
+
     pts = np.column_stack([np.asarray(X, dtype=np.float64).ravel(),
                            np.asarray(Y, dtype=np.float64).ravel()])
     n = pts.shape[0]
@@ -280,7 +309,10 @@ def alpha_shape_boundary(X, Y, shrink_factor: float = 0.5):
         return np.arange(n, dtype=np.int64)
 
     def _hull_loop():
-        ch = ConvexHull(pts)
+        # fast_qhull_tempfile: avoid scipy's per-call Windows temp-file churn
+        # (see region3d/_fastqhull.py). Numerically inert.
+        with fast_qhull_tempfile():
+            ch = ConvexHull(pts)
         v = ch.vertices.astype(np.int64)
         return np.append(v, v[0])
 
@@ -288,7 +320,8 @@ def alpha_shape_boundary(X, Y, shrink_factor: float = 0.5):
         return _hull_loop()
 
     try:
-        tri = Delaunay(pts)
+        with fast_qhull_tempfile():
+            tri = Delaunay(pts)
     except Exception:
         return _hull_loop()
 
@@ -363,16 +396,26 @@ def alpha_shape_boundary(X, Y, shrink_factor: float = 0.5):
     # Collect outward boundary half-edges (kept triangle -> non-kept neighbour).
     # scipy: neighbors[i, k] is the neighbour opposite vertex k; the edge
     # opposite vertex k of CCW triangle (t0, t1, t2) is (t[(k+1)%3], t[(k+2)%3]).
-    out_edges = []
     keep_idx = np.flatnonzero(keep)
-    for ti in keep_idx:
-        t = simplices[ti]
-        for k in range(3):
-            nb = neighbors[ti, k]
-            if nb < 0 or not keep[nb]:
-                u = int(t[(k + 1) % 3])
-                v = int(t[(k + 2) % 3])
-                out_edges.append((u, v))
+    # JIT the edge-collection loop for non-trivial triangle counts (identical
+    # ordering to the Python path below; dispatch cost amortised past ~200 tri).
+    if _HAVE_NUMBA and keep_idx.size >= 200:
+        eu, ev = _alpha_shape_boundary_edges(
+            keep_idx.astype(np.int64),
+            np.ascontiguousarray(simplices, dtype=np.int64),
+            np.ascontiguousarray(neighbors, dtype=np.int64),
+            np.ascontiguousarray(keep))
+        out_edges = list(zip(eu.tolist(), ev.tolist()))
+    else:
+        out_edges = []
+        for ti in keep_idx:
+            t = simplices[ti]
+            for k in range(3):
+                nb = neighbors[ti, k]
+                if nb < 0 or not keep[nb]:
+                    u = int(t[(k + 1) % 3])
+                    v = int(t[(k + 2) % 3])
+                    out_edges.append((u, v))
 
     if not out_edges:
         return _hull_loop()

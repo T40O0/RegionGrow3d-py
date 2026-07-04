@@ -19,6 +19,7 @@ import streamlit as st
 
 REPO = Path(__file__).resolve().parents[1]
 DRIVER = REPO / 'python' / 'driver.py'
+SUS_PARALLEL = REPO / 'python' / '_sus_parallel.py'
 PYTHON_EXE = sys.executable
 
 # Allow imports from the repo
@@ -208,6 +209,7 @@ if soil_strength_mode == 2:
         "  c' cohesion (kPa)", 0.0, 100.0, 2.0, 0.5, key='coh_uniform',
         disabled=DIS)
     run_only = ALL_RUNS  # mode=2 yields a single run anyway
+    parallel_runs = False  # single run — nothing to parallelize
 else:
     phi_uniform = 25.0
     coh_uniform = 2.0
@@ -219,6 +221,17 @@ else:
         "  Run a single run-index (quick test)",
         [ALL_RUNS, "0", "1", "2", "3", "4", "5", "6", "7", "8", "9"],
         index=0, key='run_only', disabled=DIS)
+    # Fan the 10 phi runs out across processes (each banks a contribution;
+    # combined by --aggregate → bit-identical to the serial loop). Only
+    # meaningful for the full distribution (not a single run-index).
+    parallel_runs = st.sidebar.checkbox(
+        "  ⚡ Run all runs in parallel (2 concurrent)",
+        value=False, key='parallel_runs',
+        disabled=DIS or (run_only != ALL_RUNS),
+        help="Runs the 10 φ runs 2-at-a-time instead of serially, then "
+             "aggregates. Result is identical to serial. Needs enough RAM for "
+             "2 runs (~20 GB each) — in Docker raise the WSL VM "
+             "(%USERPROFILE%\\.wslconfig → [wsl2] memory=48GB).")
 
 # ---- 4. Growth boundary -----------------------------------------------------
 nogrow_mode = st.sidebar.radio(
@@ -565,6 +578,11 @@ def _build_cmd():
 
 def _parse_progress(line: str, state: dict):
     """Update a progress dict from a driver log line."""
+    # The parallel orchestrator prefixes each line with a "YYYY-MM-DD HH:MM:SS "
+    # timestamp; the plain driver does not. Strip a leading timestamp so the
+    # anchored re.match patterns below fire for both (otherwise parallel runs
+    # never parse "PARALLEL progress"/"Total elapsed" and look stuck at 0 %).
+    line = re.sub(r"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\s+", "", line)
     m = re.match(r"Found (\d+) candidate clusters", line)
     if m:
         state['n_clusters_total'] = int(m.group(1))
@@ -580,6 +598,12 @@ def _parse_progress(line: str, state: dict):
         state['cluster_done'] = int(m.group(1))
         state['n_clusters_total'] = int(m.group(2))
         return
+    m = re.match(r"PARALLEL progress: ([\d.]+)/(\d+)", line)
+    if m:
+        state['parallel'] = True
+        state['parallel_frac'] = float(m.group(1))
+        state['parallel_total'] = int(m.group(2))
+        return
     m = re.match(r"Total elapsed: ([\d.]+) min", line)
     if m:
         state['elapsed_min'] = float(m.group(1))
@@ -589,6 +613,9 @@ def _parse_progress(line: str, state: dict):
 def _progress_fraction(state: dict) -> float:
     if state.get('done'):
         return 1.0
+    if state.get('parallel'):
+        pt = max(1, state.get('parallel_total', 1))
+        return min(0.99, state.get('parallel_frac', 0.0) / pt)
     n_runs = state.get('n_runs', 1)
     run_idx = state.get('run_idx', 1)
     n_clusters = state.get('n_clusters_total', 0)
@@ -612,6 +639,31 @@ def _parse_progress_lines(lines):
     for line in lines:
         _parse_progress(line, state)
     return state
+
+
+def _compute_already_running():
+    """Return the PID of an already-running driver/orchestrator process, or None.
+
+    Backstop against the "stale manifest" cascade: if a previous run's manifest
+    was cleared (e.g. the orchestrator was OOM-killed) but its child driver runs
+    are still alive, launching again would pile up duplicate ~20 GB runs and
+    exhaust memory. We refuse to start while any compute process is live.
+    """
+    try:
+        import psutil
+    except ImportError:
+        return None
+    me = os.getpid()
+    for p in psutil.process_iter(['pid', 'cmdline']):
+        try:
+            if p.info['pid'] == me:
+                continue
+            cl = ' '.join(p.info.get('cmdline') or [])
+            if 'driver.py' in cl or '_sus_parallel.py' in cl:
+                return p.info['pid']
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+    return None
 
 
 def _validate_inputs():
@@ -644,9 +696,37 @@ if start and not IS_RUNNING:
         st.error("Cannot start — fix these first:\n\n"
                  + "\n".join(f"- {p}" for p in _problems))
         st.stop()
+    _busy_pid = _compute_already_running()
+    if _busy_pid:
+        st.error(
+            f"⚠️ A computation is already running (PID {_busy_pid}). "
+            "It may be a previous run whose status card disappeared — it is "
+            "still working in the background. **Do not start another** (that "
+            "piles up duplicate ~20 GB runs and exhausts memory). Wait for it "
+            "to finish, or use the Stop control if shown. Reload the page in a "
+            "minute to reconnect to it.")
+        st.stop()
     cmd = _build_cmd()
     out_dir = Path(out_root) / susname
     out_dir.mkdir(parents=True, exist_ok=True)
+    if parallel_runs:
+        # Fan out via the parallel orchestrator instead of one serial driver.
+        # It runs the same driver command 2-at-a-time (--run-index) and
+        # aggregates; its stdout (progress) is captured into _run.log below,
+        # and killing its PID tears down the child runs (kill_pid kills the
+        # process tree), so the Stop button still works.
+        spec_path = out_dir / '_parallel_spec.json'
+        spec_path.write_text(json.dumps({
+            'driver_cmd': cmd,
+            'out_root': str(out_root),
+            'susname': susname,
+            'n_runs': 10,
+            'maxconc': int(os.environ.get('SUS_MAXCONC', '2')),
+            # Stagger launches so two runs never hit their ~24 GB pre-compute
+            # peak simultaneously (that OOM-killed the pool). See _sus_parallel.py.
+            'stagger': int(os.environ.get('SUS_STAGGER', '240')),
+        }), encoding='utf-8')
+        cmd = [PYTHON_EXE, '-u', str(SUS_PARALLEL), '--gui-args', str(spec_path)]
     log_path = out_dir / '_run.log'
     # Truncate any previous log for this susname.
     log_path.write_text('', encoding='utf-8')
@@ -728,18 +808,43 @@ if _manifest is not None:
                 st.rerun()
 
         st.progress(_progress_fraction(state))
+        # Use fixed placeholders so the element tree never changes shape between
+        # reruns. Conditionally adding/removing widgets (e.g. the pre-compute
+        # note when it appears/disappears) shifts everything below it and leaves
+        # Streamlit rendering an orphaned, stale copy of the log panel.
+        _info_ph = st.empty()
+        _caption_ph = st.empty()
+        _log_ph = st.empty()
+
+        if state.get('parallel') and state.get('parallel_frac', 0.0) < 0.05:
+            _info_ph.info(
+                "⏳ **Pre-compute phase** (loading DEM, derivatives, interslice "
+                "forces). The bar stays at 0 % until clusters start — this takes "
+                "a few minutes and IS running (see the log below). "
+                "**Don't press Start again** — the parallel runs advance on their "
+                "own; re-starting piles up duplicate runs.")
+        else:
+            _info_ph.empty()
+
         parts = []
-        if state.get('run_idx'):
+        if state.get('parallel'):
+            parts.append(f"⚡ Parallel {state.get('parallel_frac', 0.0):.1f}/"
+                         f"{state.get('parallel_total', 10)} runs")
+        elif state.get('run_idx'):
+            # Only meaningful for a serial run; hidden in parallel mode (where
+            # the per-phi index lives inside each child log, not this one).
             parts.append(f"Run {state['run_idx']}/{state.get('n_runs', 1)}")
         if state.get('n_clusters_total'):
             parts.append(
                 f"Cluster {state.get('cluster_done', 0)}/"
                 f"{state['n_clusters_total']}")
-        if parts:
-            st.caption(" | ".join(parts))
+        _caption_ph.caption(" | ".join(parts) if parts else " ")
 
-        st.code('\n'.join(recent) if recent else '(waiting for output...)',
-                language='text')
+        # Hide the machine-readable "PARALLEL progress:" lines (they drive the
+        # bar above; showing them too just clutters the human log).
+        _disp = [l for l in recent if 'PARALLEL progress:' not in l]
+        _log_ph.code('\n'.join(_disp) if _disp else '(waiting for output...)',
+                     language='text')
 
         # Auto-refresh while running so the log/progress update without
         # user interaction.

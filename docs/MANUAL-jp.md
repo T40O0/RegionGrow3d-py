@@ -289,6 +289,7 @@ streamlit run python/gui.py
                  - .mat ドロップダウン or Roering 期間 / 一様値
   🪨 せん断強度パラメータ  [1=分布 | 2=一様]
                  - 単一 run-index 選択 (mode=1)
+                 - ⚡ 全ラン並列実行 (2本同時) チェック (mode=1 & All runs)
                  - φ, c (mode=2)
   🚧 成長境界    [0=なし | 1=尾根+谷]
                  - 計算ソース (.mat読込 / Python計算)
@@ -311,6 +312,8 @@ streamlit run python/gui.py
 3. **完了後**:
    - 完了メッセージ
    - 結果タブ自動表示
+   - **並列モード時**は aggregate 後に **引張/圧縮マップ `net_force_prob_<susname>.tif`**
+     も自動生成される (§3.6)
 
 ### 3.3 結果タブ
 
@@ -375,6 +378,33 @@ Remove-Item "$repo\python\output_webui\.streamlit_server.pid" -ErrorAction Silen
 > 呼び出しを追加するパッチが必要です (既存の `runner._set_keep_awake` フックは
 > 解析実行中のみ有効で、アイドル時には呼ばれません)。
 
+### 3.6 並列実行 (⚡ 全ラン並列) と引張/圧縮マップ
+
+せん断強度=分布(mode 1) で **All runs** のとき、サイドバーの
+**「⚡ 全ラン並列実行 (2本同時)」** にチェックすると、10 個の φ ランを直列でなく
+**2プロセス同時**に走らせ (`python/_sus_parallel.py` オーケストレータ経由)、最後に
+`--aggregate` で合成します。各 φ の寄与は可換な確率加重和なので、**結果は直列と
+ビット一致**します。中断しても各 φ の contrib は保存され、再実行で残りだけ再開します。
+
+- **メモリ**: 1ランあたり約 20 GB。2本並列には合計約 40 GB 必要です。**Docker/WSL2 で
+  実行する場合は VM メモリを増やしてください** — `%USERPROFILE%\.wslconfig` に:
+  ```ini
+  [wsl2]
+  memory=54GB
+  ```
+  を設定し `wsl --shutdown` で反映 (既定は host の約 50%)。ネイティブ実行時も
+  空き RAM を確認のうえで。
+- **precompute 中は進捗バーが 0% のまま**数分続きます (DEM・導関数・力の事前計算)。
+  ログにフェーズが出ていれば正常。**Start を連打しない**でください (二重起動ガードが
+  弾きますが、待つのが正解)。
+
+**引張/圧縮マップ (自動生成)**: 並列モードの aggregate 完了後、
+`net_force_prob_<susname>.tif` が自動生成されます。これは各すべりセルの
+**正味の力 q = 駆動 − 抵抗** (`Interslice_Force`) を φ で確率加重した連続場で、
+**圧縮が正 (赤系統) / 引張が負 (青系統)** の符号規約です。0 を中心とした発散
+カラーマップで表示してください。CLI からは `--tension_compression 1` で単独生成可
+(contrib が必要)。
+
 ---
 
 ## 4. CLI の使い方
@@ -425,6 +455,7 @@ python python/driver.py --help
 | `--save_intermediates 0\|1` | `1` | 1 で depth/nogrow/PGA/hillshade を TIFF 保存 |
 | `--run-index INT` | `None` | 0始まりの単一ランのみ計算し `<out>/<susname>/contribs/` に保存（低メモリ・レジューム、§4.4）。その run の部分 `sus_*.tif` も出力。`0 ≤ index < ラン数` 必須、`--aggregate` と排他 |
 | `--aggregate 0\|1` | `0` | `contribs/contrib_run*.npz` を合算して最終マップを書き終了。`--DEM_path` と `--test_no`/`--susname_override` のみで可。寄与が不完全/分布不一致ならエラー（§4.4） |
+| `--tension_compression 0\|1` | `0` | `contribs/` から **引張/圧縮マップ `net_force_prob_*.tif`** を生成し終了（per-cell の正味力 q を φ 確率加重、圧縮=正/引張=負、§3.6）。通常ランと同じ入力が必要、region-grow は走らせない。並列モードでは aggregate 後に自動実行 |
 | `--max_cell_offset INT` | `400` | 境界拡張時の局所窓の上限 [セル]。到達したクラスタは `terminate_reason=7` となり **MATLAB と乖離**（MATLABは無制限に再試行）、警告を出力。巨大クラスタを完全成長させたい場合は増やす |
 
 ### 4.3 実用例
@@ -631,6 +662,7 @@ USGS 公式リポジトリ <https://code.usgs.gov/ghsc/lhp/regiongrow3d> から�
 | ファイル | 内容 |
 |---|---|
 | `sus_<susname>_python.tif` | susceptibility 0-100% (主出力) |
+| `net_force_prob_<susname>.tif` | 引張/圧縮マップ。per-cell 正味力 q を φ 確率加重した連続場、**圧縮=正 / 引張=負** (並列モード or `--tension_compression 1`、§3.6) |
 | `depth.tif` | 土層厚 [m] (`save_intermediates=1`) |
 | `nogrow_io.tif` | 無成長帯マスク 0/1 |
 | `PGA.tif` | PGA [g] |

@@ -253,6 +253,74 @@ def _write_sus_raster(sus, Z, georef, out_dir, susname):
     return out_path
 
 
+def _tension_compression(args, Z, georef, subdx, subdy, W, sigma_s, PGA,
+                         prob, prob_phi, prob_coh, susname, out_dir):
+    """Probability-weighted per-cell net driving force q (tension/compression).
+
+    Interslice_Force gives, for EVERY cell of a slide (not just its margin), a
+    net force  q = driving - resisting  (n·sinα + PGA·W minus cohesion+friction;
+    Interslice_Force.m). q > 0 => net driving = active/**tension** state (typically
+    the head); q < 0 => net resisting = passive/**compression** (the toe). This is
+    the interior force balance the boundary earth-pressure wedges sit on top of.
+
+    For each soil-strength run i we evaluate q on that run's final slide cells
+    (read from contribs/), weight by prob[i], and accumulate — mirroring how the
+    susceptibility map weights slide occurrence. subdx/subdy/W/sigma_s/PGA are
+    phi-independent and already computed, so this needs no region-grow.
+
+    Writes ONE signed GeoTIFF with the convention **compression positive,
+    tension negative** (stores Σ prob·(−q)), so a diverging colour ramp shows
+    compression red / tension blue:
+      net_force_prob_<s>.tif   Σ prob·(−q)   ( >0 compression … <0 tension )
+    """
+    from region3d.forces import interslice_force
+    cdir = out_dir / 'contribs'
+    if not sorted(cdir.glob('contrib_run*.npz')):
+        sys.exit(f"[tension_compression] no contributions in {cdir} — run the "
+                 "susceptibility analysis first (--run-index runs or the UI "
+                 "parallel mode), then re-run with --tension_compression 1.")
+    shape = Z.shape
+    m = shape[0]
+    field = np.zeros(shape, dtype=np.float64)   # + compression … − tension
+    n_used = 0
+    for i in range(prob.size):
+        cf = cdir / f"contrib_run{i:02d}.npz"
+        if not cf.exists():
+            print(f"  run {i+1}/{prob.size}: contrib missing, skipping")
+            continue
+        with np.load(cf) as d:
+            idx0 = d['idx'].astype(np.int64)          # C-order flat slide indices
+            pr = float(d['prob'])
+            no_slides = bool(d['no_slides']) if 'no_slides' in d.files else False
+        if pr == 0.0 or idx0.size == 0:
+            if no_slides:
+                print(f"  run {i+1}: no slides — stopping (matches SUS break)")
+                break
+            continue
+        ii, jj = np.unravel_index(idx0, shape)                    # C-order row,col
+        idx_1based = (jj.astype(np.int64) * m + ii + 1)           # F-order 1-based
+        coh_full = np.full(shape, np.float32(prob_coh[i]), dtype=np.float32)
+        phi_full = np.full(shape, np.float32(prob_phi[i]), dtype=np.float32)
+        Q, *_ = interslice_force(subdx, subdy, georef.x_cellsize,
+                                 georef.y_cellsize, coh_full, phi_full, W,
+                                 sigma_s, idx_1based, PGA)
+        q = Q[ii, jj].astype(np.float64)
+        # Store −q so compression (q<0) is POSITIVE and tension (q>0) NEGATIVE.
+        field[ii, jj] += pr * (-q)
+        n_used += 1
+        print(f"  run {i+1}/{prob.size}: phi={prob_phi[i]:.2f} "
+              f"cells={idx0.size} prob={pr:.4f} "
+              f"q=[{float(q.min()):.1f},{float(q.max()):.1f}]", flush=True)
+        if no_slides:
+            print(f"  run {i+1}: no-slides flag — stopping (matches SUS break)")
+            break
+    field[np.isnan(Z)] = np.nan
+    p = out_dir / f"net_force_prob_{susname}.tif"
+    write_raster(p, field.astype(np.float32), georef)
+    print(f"[tension_compression] combined {n_used} run(s) -> "
+          f"{p.relative_to(REPO_ROOT).as_posix()}  (+compression / −tension)")
+
+
 def run(args):
     _set_keep_awake(True)
     try:
@@ -585,6 +653,15 @@ def _run_impl(args):
     out_dir.mkdir(parents=True, exist_ok=True)
     print(f"Output directory: {out_dir}")
 
+    # ---- Tension/compression post-process (reuses the inputs above) --------
+    if int(getattr(args, 'tension_compression', 0)):
+        print("Tension/compression mode: per-cell net force q, prob-weighted "
+              "over runs (no region-grow).")
+        _tension_compression(args, Z, georef, subdx, subdy, W, sigma_s, PGA,
+                             prob, prob_phi, prob_coh, susname, out_dir)
+        print(f"Total elapsed: {(time.time()-t0)/60.0:.2f} min")
+        return
+
     # ---- Susceptibility runs ------------------------------------------------
     sus_map = np.zeros(Z.shape, dtype=np.float32)
     diagnostics_per_run = []
@@ -723,6 +800,10 @@ def main():
     p.add_argument('--aggregate', type=int, default=0,
                    help='Combine saved per-run contributions (contribs/*.npz) into the final '
                         'susceptibility map and exit. Needs only --DEM_path + --test_no/--susname_override.')
+    p.add_argument('--tension_compression', type=int, default=0,
+                   help='Post-process the banked contribs into probability-weighted '
+                        'per-cell net-force (tension/compression) GeoTIFFs, then exit. '
+                        'Same inputs as a normal run; runs no region-grow.')
     args = p.parse_args()
     if isinstance(args.rot_range, list):
         args.rot_range = tuple(args.rot_range)
