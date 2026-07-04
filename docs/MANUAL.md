@@ -896,11 +896,22 @@ on your machine for real numbers.
 | RegionGrow (1 run) | ~100–300× (scales with cluster count) |
 | Full distribution (10 runs) | ~10× a single RegionGrow run |
 
+> ⚡ The table is a **compute-cost** guide. Using "Run all runs in parallel"
+> (2-wide) roughly halves the full-distribution **wall-clock** (same compute; §10.2).
+
 ### 10.2 Tips
 1. **Numba is essential**: without it `soil_depth` is 50× slower.
 2. **`mat` source**: if the DEM doesn't change, loading `.mat` is seconds.
-3. **CPU parallelism**: currently single-threaded in most places; the JIT'd
-   functions with `prange` parallelise automatically.
+3. **φ parallelism (2-wide)**: the "⚡ Run all runs in parallel" checkbox runs the
+   10 runs 2 processes at a time (`_sus_parallel.py`, §3.6) for ~2× throughput;
+   result is bit-identical to serial. ~20 GB per run (raise the VM via
+   `.wslconfig` under Docker).
+4. **Qhull speedup (Windows, automatic)**: `region3d/_fastqhull.py` removes
+   scipy Delaunay's per-call temp file (Defender-scanned on Windows — the
+   dominant cost of the cluster-boundary geometry) by reusing one file → ~2×
+   per run. Output bit-identical; a no-op on Linux.
+5. **CPU parallelism (within a run)**: the cluster loop of a single run is mostly
+   single-threaded; only the `prange` JIT'd functions parallelise automatically.
 
 ### 10.3 Algorithmic options
 - `cluster_size_thresh`: 7 (default). Smaller = more candidate clusters →
