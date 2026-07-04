@@ -303,6 +303,7 @@ streamlit run python/gui.py
                      - .mat dropdown or Roering duration / uniform value
   🪨 Shear strength parameters  [1=distribution | 2=uniform]
                      - single run-index selector (mode=1)
+                     - ⚡ Run all runs in parallel (2 concurrent) checkbox (mode=1 & All runs)
                      - φ, c (mode=2)
   🚧 Growth boundary [0=off | 1=ridges+valleys]
                      - data source (.mat / Python)
@@ -325,6 +326,8 @@ streamlit run python/gui.py
 3. **After completion**:
    - Status banner remains visible.
    - Result tabs render automatically.
+   - **In parallel mode**, the tension/compression map
+     `net_force_prob_<susname>.tif` is also generated after aggregate (§7.4).
 
 ### 3.3 Result tabs
 
@@ -390,6 +393,32 @@ Remove-Item "$repo\python\output_webui\.streamlit_server.pid" -ErrorAction Silen
 > keep-awake call (the existing `runner._set_keep_awake` hook is only
 > invoked during an active analysis run, not while idling).
 
+### 3.6 Parallel runs (⚡ Run all runs in parallel)
+
+With shear strength = distribution (mode 1) and **All runs**, ticking
+**"⚡ Run all runs in parallel (2 concurrent)"** runs the 10 φ runs **2 processes
+at a time** (via the `python/_sus_parallel.py` orchestrator) instead of serially,
+then combines them with `--aggregate`. Each φ contribution is a commutative
+probability-weighted sum, so the **result is bit-identical to the serial loop**.
+It is resume-safe: each φ's contribution is banked, and re-launching finishes
+only the remaining runs.
+
+- **Memory:** ~20 GB per run, so ~40 GB for 2 concurrent. **When running under
+  Docker/WSL2, raise the VM memory** — put in `%USERPROFILE%\.wslconfig`:
+  ```ini
+  [wsl2]
+  memory=54GB
+  ```
+  and apply with `wsl --shutdown` (default is ~50% of host). Check free RAM for
+  native runs too.
+- **The bar stays at 0 % for the first few minutes** (pre-compute: DEM,
+  derivatives, interslice forces). If the log shows phases advancing it IS
+  running. **Don't click Start again** — a double-start guard blocks it, but
+  waiting is the right move.
+
+After aggregate, parallel mode also auto-generates the tension/compression map
+`net_force_prob_<susname>.tif` (meaning and sign convention in §7.4).
+
 ---
 
 ## 4. Command line
@@ -440,6 +469,7 @@ Key options:
 | `--save_intermediates 0\|1` | `1` | also write depth/nogrow/PGA/hillshade TIFFs |
 | `--run-index INT` | `None` | compute only one 0-based distribution index and bank it to `<out>/<susname>/contribs/` for later `--aggregate` (low-memory resume, see §4.4). Also writes that run's partial `sus_*.tif`. Must be `0 ≤ index < #runs`; mutually exclusive with `--aggregate` |
 | `--aggregate 0\|1` | `0` | combine all `contribs/contrib_run*.npz` into the final susceptibility map and exit; needs only `--DEM_path` + `--test_no`/`--susname_override`. Fails if the contribution set is incomplete or mixes distributions (see §4.4) |
+| `--tension_compression 0\|1` | `0` | build the **tension/compression map `net_force_prob_*.tif`** from `contribs/` and exit. The per-cell net force q (q>0 = tension / q<0 = compression) is **sign-flipped (`−q`)** then probability-weighted over φ, so the **output is compression-positive / tension-negative** (§7.4). Needs the same inputs as a normal run; runs no region-grow. Parallel mode runs it automatically after aggregate |
 | `--max_cell_offset INT` | `400` | cap on the local-window half-size [cells] during boundary expansion. Clusters that hit it get `terminate_reason=7` and **diverge from MATLAB** (which retries unboundedly); a warning is printed. Raise it to grow very large clusters fully |
 
 ### 4.3 Examples
@@ -648,6 +678,7 @@ Output directory `<out_dir>/<susname>/`:
 | File | Content |
 |---|---|
 | `sus_<susname>_python.tif` | susceptibility 0–100 % (main output) |
+| `net_force_prob_<susname>.tif` | tension/compression map. Per-cell net force q (q>0 = tension, q<0 = compression) **sign-flipped (`−q`)** and probability-weighted over φ → **output is compression-positive / tension-negative** (parallel mode or `--tension_compression 1`; details §7.4) |
 | `depth.tif` | soil depth [m] (`save_intermediates=1`) |
 | `nogrow_io.tif` | no-grow mask 0/1 |
 | `PGA.tif` | PGA [g] |
@@ -728,6 +759,32 @@ With a 10-run distribution the susceptibility raster only takes these
 - **>0% cells**: included by at least one run (overestimation-leaning)
 - **>50% cells**: above-half probability of failure (high-confidence)
 - **>90% cells**: near-certain landslide source
+
+### 7.4 Tension/compression map (`net_force_prob_<susname>.tif`)
+
+A continuous field describing the **force state inside the slides** (auto-generated
+in parallel mode, or via CLI `--tension_compression 1`; needs each φ's contrib).
+
+**What it is:** `Interslice_Force` solves equilibrium at **every cell of a slide**,
+not just its margin, returning a per-cell net force **`q = driving − resisting`**:
+
+| sign of q | meaning | typical location |
+|---|---|---|
+| `q > 0` | driving dominates = **tension** (active) | slide head / upslope |
+| `q < 0` | resisting dominates = **compression** (passive) | slide toe / downslope |
+
+**Sign convention (important):** for visualisation the TIF stores the
+**sign-flipped `−q`** probability-weighted over φ (`value = Σ_k prob[k]·(−q_k)`,
+only for runs where the cell slides). Because of this flip, **file values are
+compression-positive / tension-negative**:
+
+| file value | state | suggested colour |
+|---|---|---|
+| **positive (> 0)** | compression (resisting) | red |
+| **negative (< 0)** | tension (driving) | blue |
+
+**Display:** apply a 0-centred *diverging* colour ramp (e.g. QGIS RdBu, with a
+symmetric min/max, positive = red / negative = blue).
 
 ---
 
