@@ -378,7 +378,7 @@ Remove-Item "$repo\python\output_webui\.streamlit_server.pid" -ErrorAction Silen
 > 呼び出しを追加するパッチが必要です (既存の `runner._set_keep_awake` フックは
 > 解析実行中のみ有効で、アイドル時には呼ばれません)。
 
-### 3.6 並列実行 (⚡ 全ラン並列) と引張/圧縮マップ
+### 3.6 並列実行 (⚡ 全ラン並列)
 
 せん断強度=分布(mode 1) で **All runs** のとき、サイドバーの
 **「⚡ 全ラン並列実行 (2本同時)」** にチェックすると、10 個の φ ランを直列でなく
@@ -398,14 +398,8 @@ Remove-Item "$repo\python\output_webui\.streamlit_server.pid" -ErrorAction Silen
   ログにフェーズが出ていれば正常。**Start を連打しない**でください (二重起動ガードが
   弾きますが、待つのが正解)。
 
-**引張/圧縮マップ (自動生成)**: 並列モードの aggregate 完了後、
-`net_force_prob_<susname>.tif` が自動生成されます。各すべりセルの
-**正味の力 q = 駆動 − 抵抗** (`Interslice_Force`) は、物理的には
-**q > 0 = 引張**（駆動優勢＝active、頭部側）、**q < 0 = 圧縮**（抵抗優勢＝passive、
-末端側）です。ただし可視化の都合で **q の符号を反転した `−q` を格納**しています
-（`Σ prob·(−q)`）。この反転により **出力 TIF の値は 圧縮が正 (赤系統) / 引張が負
-(青系統)** になります。0 を中心とした発散カラーマップで表示してください。CLI からは
-`--tension_compression 1` で単独生成可 (contrib が必要)。
+並列モードの aggregate 完了後は、susceptibility に加えて **引張/圧縮マップ
+`net_force_prob_<susname>.tif`** も自動生成されます (意味・符号規約は §7.4)。
 
 ---
 
@@ -457,7 +451,7 @@ python python/driver.py --help
 | `--save_intermediates 0\|1` | `1` | 1 で depth/nogrow/PGA/hillshade を TIFF 保存 |
 | `--run-index INT` | `None` | 0始まりの単一ランのみ計算し `<out>/<susname>/contribs/` に保存（低メモリ・レジューム、§4.4）。その run の部分 `sus_*.tif` も出力。`0 ≤ index < ラン数` 必須、`--aggregate` と排他 |
 | `--aggregate 0\|1` | `0` | `contribs/contrib_run*.npz` を合算して最終マップを書き終了。`--DEM_path` と `--test_no`/`--susname_override` のみで可。寄与が不完全/分布不一致ならエラー（§4.4） |
-| `--tension_compression 0\|1` | `0` | `contribs/` から **引張/圧縮マップ `net_force_prob_*.tif`** を生成し終了。per-cell 正味力 q（q>0=引張/q<0=圧縮）の**符号を反転(`−q`)**して φ 確率加重するので**出力は圧縮=正/引張=負**（§3.6）。通常ランと同じ入力が必要、region-grow は走らせない。並列モードでは aggregate 後に自動実行 |
+| `--tension_compression 0\|1` | `0` | `contribs/` から **引張/圧縮マップ `net_force_prob_*.tif`** を生成し終了。per-cell 正味力 q（q>0=引張/q<0=圧縮）の**符号を反転(`−q`)**して φ 確率加重するので**出力は圧縮=正/引張=負**（§7.4）。通常ランと同じ入力が必要、region-grow は走らせない。並列モードでは aggregate 後に自動実行 |
 | `--max_cell_offset INT` | `400` | 境界拡張時の局所窓の上限 [セル]。到達したクラスタは `terminate_reason=7` となり **MATLAB と乖離**（MATLABは無制限に再試行）、警告を出力。巨大クラスタを完全成長させたい場合は増やす |
 
 ### 4.3 実用例
@@ -665,7 +659,7 @@ USGS 公式リポジトリ <https://code.usgs.gov/ghsc/lhp/regiongrow3d> から�
 | ファイル | 内容 |
 |---|---|
 | `sus_<susname>_python.tif` | susceptibility 0-100% (主出力) |
-| `net_force_prob_<susname>.tif` | 引張/圧縮マップ。per-cell 正味力 q（q>0=引張, q<0=圧縮）の**符号を反転(`−q`)**して φ 確率加重した連続場 → **出力は 圧縮=正 / 引張=負** (並列モード or `--tension_compression 1`、§3.6) |
+| `net_force_prob_<susname>.tif` | 引張/圧縮マップ。per-cell 正味力 q（q>0=引張, q<0=圧縮）の**符号を反転(`−q`)**して φ 確率加重した連続場 → **出力は 圧縮=正 / 引張=負** (並列モード or `--tension_compression 1`、詳細 §7.4) |
 | `depth.tif` | 土層厚 [m] (`save_intermediates=1`) |
 | `nogrow_io.tif` | 無成長帯マスク 0/1 |
 | `PGA.tif` | PGA [g] |
@@ -741,6 +735,31 @@ sus[i,j] = prob[0] + prob[1] + … + prob[k*]
 - **>0% セル**: 1 つでも不安定とされた領域 (overestimation 寄り)
 - **>50% セル**: 過半確率で不安定 (信頼度高)
 - **>90% セル**: 殆ど確実に landslide を起こす領域
+
+### 7.4 引張/圧縮マップ (`net_force_prob_<susname>.tif`)
+
+すべり内部の**力の状態**を表す連続場ファイルです（並列モードで自動生成、または
+CLI `--tension_compression 1`。生成には各 φ の contrib が必要）。
+
+**中身**: `Interslice_Force` は境界だけでなく**すべりの全セル**で釣り合いを解き、
+各セルの正味の力 **`q = 駆動 − 抵抗`** を返します。物理的には:
+
+| q の符号 | 意味 | 位置の目安 |
+|---|---|---|
+| `q > 0` | 駆動優勢 = **引張** (active) | すべり頭部・上流側 |
+| `q < 0` | 抵抗優勢 = **圧縮** (passive) | すべり末端 (toe)・下流側 |
+
+**符号規約 (重要)**: 可視化の都合で TIF には **`q` の符号を反転した `−q`** を
+φ で確率加重して格納します（`セル値 = Σ_k prob[k]·(−q_k)`、そのセルが滑る run のみ）。
+この反転により、**出力ファイルの値は 圧縮が正・引張が負**になります:
+
+| ファイル値 | 状態 | 推奨色 |
+|---|---|---|
+| **正 (> 0)** | 圧縮 (抵抗優勢) | 赤系統 |
+| **負 (< 0)** | 引張 (駆動優勢) | 青系統 |
+
+**表示**: 0 を中心とした発散 (diverging) カラーマップを当ててください
+(例: QGIS の RdBu を反転して 正=赤/負=青、min/max を対称レンジに)。
 
 ---
 
