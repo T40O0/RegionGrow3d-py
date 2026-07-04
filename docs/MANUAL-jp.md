@@ -399,11 +399,13 @@ Remove-Item "$repo\python\output_webui\.streamlit_server.pid" -ErrorAction Silen
   弾きますが、待つのが正解)。
 
 **引張/圧縮マップ (自動生成)**: 並列モードの aggregate 完了後、
-`net_force_prob_<susname>.tif` が自動生成されます。これは各すべりセルの
-**正味の力 q = 駆動 − 抵抗** (`Interslice_Force`) を φ で確率加重した連続場で、
-**圧縮が正 (赤系統) / 引張が負 (青系統)** の符号規約です。0 を中心とした発散
-カラーマップで表示してください。CLI からは `--tension_compression 1` で単独生成可
-(contrib が必要)。
+`net_force_prob_<susname>.tif` が自動生成されます。各すべりセルの
+**正味の力 q = 駆動 − 抵抗** (`Interslice_Force`) は、物理的には
+**q > 0 = 引張**（駆動優勢＝active、頭部側）、**q < 0 = 圧縮**（抵抗優勢＝passive、
+末端側）です。ただし可視化の都合で **q の符号を反転した `−q` を格納**しています
+（`Σ prob·(−q)`）。この反転により **出力 TIF の値は 圧縮が正 (赤系統) / 引張が負
+(青系統)** になります。0 を中心とした発散カラーマップで表示してください。CLI からは
+`--tension_compression 1` で単独生成可 (contrib が必要)。
 
 ---
 
@@ -455,7 +457,7 @@ python python/driver.py --help
 | `--save_intermediates 0\|1` | `1` | 1 で depth/nogrow/PGA/hillshade を TIFF 保存 |
 | `--run-index INT` | `None` | 0始まりの単一ランのみ計算し `<out>/<susname>/contribs/` に保存（低メモリ・レジューム、§4.4）。その run の部分 `sus_*.tif` も出力。`0 ≤ index < ラン数` 必須、`--aggregate` と排他 |
 | `--aggregate 0\|1` | `0` | `contribs/contrib_run*.npz` を合算して最終マップを書き終了。`--DEM_path` と `--test_no`/`--susname_override` のみで可。寄与が不完全/分布不一致ならエラー（§4.4） |
-| `--tension_compression 0\|1` | `0` | `contribs/` から **引張/圧縮マップ `net_force_prob_*.tif`** を生成し終了（per-cell の正味力 q を φ 確率加重、圧縮=正/引張=負、§3.6）。通常ランと同じ入力が必要、region-grow は走らせない。並列モードでは aggregate 後に自動実行 |
+| `--tension_compression 0\|1` | `0` | `contribs/` から **引張/圧縮マップ `net_force_prob_*.tif`** を生成し終了。per-cell 正味力 q（q>0=引張/q<0=圧縮）の**符号を反転(`−q`)**して φ 確率加重するので**出力は圧縮=正/引張=負**（§3.6）。通常ランと同じ入力が必要、region-grow は走らせない。並列モードでは aggregate 後に自動実行 |
 | `--max_cell_offset INT` | `400` | 境界拡張時の局所窓の上限 [セル]。到達したクラスタは `terminate_reason=7` となり **MATLAB と乖離**（MATLABは無制限に再試行）、警告を出力。巨大クラスタを完全成長させたい場合は増やす |
 
 ### 4.3 実用例
@@ -663,7 +665,7 @@ USGS 公式リポジトリ <https://code.usgs.gov/ghsc/lhp/regiongrow3d> から�
 | ファイル | 内容 |
 |---|---|
 | `sus_<susname>_python.tif` | susceptibility 0-100% (主出力) |
-| `net_force_prob_<susname>.tif` | 引張/圧縮マップ。per-cell 正味力 q を φ 確率加重した連続場、**圧縮=正 / 引張=負** (並列モード or `--tension_compression 1`、§3.6) |
+| `net_force_prob_<susname>.tif` | 引張/圧縮マップ。per-cell 正味力 q（q>0=引張, q<0=圧縮）の**符号を反転(`−q`)**して φ 確率加重した連続場 → **出力は 圧縮=正 / 引張=負** (並列モード or `--tension_compression 1`、§3.6) |
 | `depth.tif` | 土層厚 [m] (`save_intermediates=1`) |
 | `nogrow_io.tif` | 無成長帯マスク 0/1 |
 | `PGA.tif` | PGA [g] |
