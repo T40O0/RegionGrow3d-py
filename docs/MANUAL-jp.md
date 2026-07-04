@@ -511,7 +511,8 @@ python python/driver.py --DEM_path <dem> --susname_override <susname> \
 各寄与はラン数と「スライドなし」フラグを記録し、一括ループの早期停止挙動を再現します。
 共有中間ラスタ（depth/nogrow/PGA/hillshade）は `--run-index 0` が一度だけ書き出します。
 
-> 能登 a20k 用のレジューム対応ループは `python/_sus_loop.sh`（GRASS Docker 内実行）にあります。
+> 複数 φ ランのレジューム対応オーケストレータは `python/_sus_parallel.py` にあります
+> （2本並列、Windows/Docker 共通。GUI の「⚡ 全ラン並列実行」もこれを使用。§3.6）。
 
 ---
 

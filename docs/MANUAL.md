@@ -501,8 +501,9 @@ count and a "no slides" flag so aggregation reproduces the monolithic loop's
 early-stop behavior. The shared intermediate rasters (depth/nogrow/PGA/
 hillshade) are written once, by `--run-index 0`.
 
-> A ready-made resume-safe loop for the Noto a20k case lives in
-> `python/_sus_loop.sh` (run inside the GRASS Docker image).
+> A resume-safe orchestrator for the multi-phi runs lives in
+> `python/_sus_parallel.py` (2-wide, Windows/Docker; also backs the GUI's
+> "Run all runs in parallel" checkbox).
 
 ---
 
