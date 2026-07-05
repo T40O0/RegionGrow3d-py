@@ -781,6 +781,20 @@ if _manifest is not None:
     # the process finished in the gap, we'd miss the final "Total elapsed" line
     # and misreport a successful run as a crash.
     is_alive = pid_alive(_manifest.get('pid'), _manifest.get('create_time'))
+    # Staleness guard: a live run appends to its log continuously (driver "LS
+    # Cluster" lines / orchestrator progress every few seconds). If the log is
+    # missing or hasn't changed in a long time, the run is actually dead — even
+    # if the PID still "exists" (e.g. the manifest's create_time was null so the
+    # identity check was skipped, and the OS recycled the dead run's PID to an
+    # unrelated process). Without this the UI hangs on "Computing…" forever.
+    # Also fires after a sleep/suspend killed the detached run (time jumps ahead).
+    if is_alive and (time.time() - start_time) > 120:
+        try:
+            log_age = time.time() - log_path.stat().st_mtime
+        except OSError:
+            log_age = None          # log never created / removed
+        if log_age is None or log_age > 900:   # 15 min without any output
+            is_alive = False
     recent = tail_log(log_path, max_lines=25)
     state = _parse_progress_lines(recent)
 
