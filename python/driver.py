@@ -306,11 +306,18 @@ def _tension_compression(args, Z, georef, subdx, subdy, W, sigma_s, PGA,
                                  sigma_s, idx_1based, PGA)
         q = Q[ii, jj].astype(np.float64)
         # Store −q so compression (q<0) is POSITIVE and tension (q>0) NEGATIVE.
-        field[ii, jj] += pr * (-q)
+        # A few degenerate near-vertical subsurface cells yield NaN q (cos→0 in
+        # the column-area term); zero their contribution so a single NaN can't
+        # poison a cell that other runs cover.
+        n_nan = int(np.isnan(q).sum())
+        neg_q = np.where(np.isnan(q), 0.0, -q)
+        field[ii, jj] += pr * neg_q
         n_used += 1
+        qlo = float(np.nanmin(q)) if n_nan < q.size else float('nan')
+        qhi = float(np.nanmax(q)) if n_nan < q.size else float('nan')
         print(f"  run {i+1}/{prob.size}: phi={prob_phi[i]:.2f} "
               f"cells={idx0.size} prob={pr:.4f} "
-              f"q=[{float(q.min()):.1f},{float(q.max()):.1f}]", flush=True)
+              f"q=[{qlo:.1f},{qhi:.1f}] nan={n_nan}", flush=True)
         if no_slides:
             print(f"  run {i+1}: no-slides flag — stopping (matches SUS break)")
             break
