@@ -229,7 +229,20 @@ docker compose run --rm region3d python python/driver.py   # CLI
 ```
 
 ベースイメージ: `python:3.13-slim` (約 200 MB)。完成イメージは依存込みで約 1 GB。
-ボリュームマウントしないと DEM がコンテナ内になく、結果も永続化されません。
+
+> ⚠️ **出力先の落とし穴（必読）**: Dockerfile は `/app/python/output_webui`
+> （と `/app/python/output`）を `VOLUME` 宣言しています。そのため上記 3 マウント
+> （`lib` / `output` / `output_webui`）を**明示指定しないと**、成果物は
+> **匿名 Docker ボリューム**に書かれ **ホストからは一切見えません**（＝計算は
+> 成功しているのに「成果が無い」ように見える）。
+>
+> - コード編集用に `python/` ディレクトリ全体をマウントする場合でも、
+>   `-v "$(pwd)/python/output_webui:/app/python/output_webui"` の**明示マウントは別途必要**
+>   です（子パスの明示マウントが匿名ボリュームを上書きする）。
+> - 最初から正しくマウントされる `docker compose up` を推奨。
+> - 既に匿名ボリュームに埋もれた成果物の救出:
+>   `docker cp region3d_ui:/app/python/output_webui/<susname> <ホストのパス>`
+>   （停止中コンテナでも可）。
 
 ### 2.2 conda (ローカルインストール)
 ```bash
