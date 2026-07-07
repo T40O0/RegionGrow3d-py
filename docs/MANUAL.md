@@ -243,20 +243,7 @@ docker compose run --rm region3d python python/driver.py   # CLI
 ```
 
 Base image: `python:3.13-slim` (~200 MB). Final image is ~1 GB with deps.
-
-> ⚠️ **Output-path gotcha (read this):** the Dockerfile declares
-> `/app/python/output_webui` (and `/app/python/output`) as `VOLUME`s. If you do
-> **not** pass the three explicit mounts above (`lib` / `output` /
-> `output_webui`), results are written to an **anonymous Docker volume** and are
-> **invisible on the host** — the run succeeds but looks like it produced nothing.
->
-> - Even when mounting the whole `python/` dir for live code editing, you must
->   **still** add `-v "$(pwd)/python/output_webui:/app/python/output_webui"` — the
->   explicit child mount overrides the anonymous volume.
-> - Prefer `docker compose up`, which mounts everything correctly out of the box.
-> - To recover results already trapped in an anonymous volume:
->   `docker cp region3d_ui:/app/python/output_webui/<susname> <host_path>`
->   (works even on a stopped container).
+Without volume mounts, the container has no DEM and results aren't persisted.
 
 ### 2.2 Conda (local install)
 ```bash
