@@ -37,11 +37,6 @@ lib/soil_depth/*.tif
 lib/soil_depth/*.tif.aux.xml
 lib/soil_depth/*.tif.ovr
 
-# MATLAB reference outputs
-post_processing/**/*.mat
-post_processing/**/*.tif
-post_processing/**/*.tif.aux.xml
-post_processing/**/*.tif.ovr
 
 # Rendered figures bake in third-party basemap tiles and restricted
 # inventory/DEM data — do not commit.
@@ -79,3 +74,7 @@ python/verify_against_upstream.py
 
 # Claude Code session metadata
 .claude/
+
+# Post-processing analysis: site-specific scripts/reports/data, not for
+# version control (may reveal analysis location and depend on private data).
+post_processing/
