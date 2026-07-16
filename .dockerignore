@@ -36,11 +36,17 @@ lib/**/*.pdf
 lib/**/*.pptx
 lib/**/*.zip
 lib/**/*.xml
-post_processing/**/*.tif
-post_processing/**/*.mat
+# Post-processing is local working data (gitignored) and is bind-mounted with
+# `-v` when its scripts are run in the container — baking it in would ship ~170
+# MB of stale copies that silently shadow the real thing on a mount-less run.
+post_processing
 
 # Local scratch / diagnostic scripts (not part of the shipped pipeline)
 python/_*.py
+# ...except the parallel orchestrator: gui.py launches it by path, and
+# docker-compose.yml does not mount ./python, so excluding it breaks the UI's
+# parallel mode with FileNotFoundError on a compose-started container.
+!python/_sus_parallel.py
 
 # Tests are not needed for container runtime
 python/tests
