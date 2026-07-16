@@ -121,11 +121,43 @@ def _identity_ok(pid: int, create_time: Optional[float]) -> bool:
         return False
 
 
+def _is_zombie(pid: int) -> bool:
+    """True if `pid` is a zombie (defunct): it has exited but its parent has not
+    reaped it, so it lingers in the process table holding nothing but its PID.
+
+    Both `os.kill(pid, 0)` and `psutil.pid_exists()` report a zombie as existing,
+    which made the UI hang on "Computing…" forever after a run finished: the
+    detached orchestrator is reparented to PID 1 — the container's Streamlit
+    process — which never wait()s for it, so its zombie never goes away.
+
+    Works without psutil (the container image ships without it) by reading
+    /proc directly. On Windows there are no zombies and no /proc, so this is
+    always False there.
+    """
+    try:
+        import psutil
+        try:
+            return psutil.Process(pid).status() == psutil.STATUS_ZOMBIE
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            return False
+    except ImportError:
+        pass
+    try:
+        with open(f'/proc/{pid}/stat', 'rb') as fh:
+            # "<pid> (<comm>) <state> ..." — comm can itself contain spaces and
+            # parentheses, so the state is the first field after the LAST ')'.
+            return fh.read().rsplit(b')', 1)[1].split()[0] == b'Z'
+    except (OSError, IndexError):
+        return False
+
+
 def pid_alive(pid: Optional[int], create_time: Optional[float] = None) -> bool:
     """Whether `pid` is running AND (if create_time is given) is the same
     process we launched — guards against PID reuse reconnecting to a stranger.
     """
     if not pid:
+        return False
+    if _is_zombie(int(pid)):
         return False
     try:
         import psutil

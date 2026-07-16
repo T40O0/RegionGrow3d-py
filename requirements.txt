@@ -15,7 +15,12 @@ geopandas>=1.0
 scikit-image>=0.22
 
 # --- JIT acceleration ---
-numba>=0.60
+# Pinned, not a minimum: numba JIT-compiles the region-grow hot loop, so a
+# version bump can change floating-point codegen and with it the last bits of a
+# result. These are the versions that produced the Noto production runs; keep
+# them until a rebuild's output is verified bit-identical against one.
+numba==0.65.1
+llvmlite==0.47.0
 
 # --- Visualisation ---
 matplotlib>=3.8
@@ -23,3 +28,9 @@ matplotlib>=3.8
 # --- Web UI ---
 streamlit>=1.50
 pandas>=2.0
+# Process supervision for the UI's run manifest. Without it the guards in
+# region3d/runner.py silently degrade to no-ops: a run's PID can no longer be
+# pinned to the process we launched (recycled-PID protection off), and the
+# "a computation is already running" check that stops duplicate ~20 GB runs
+# from exhausting memory never fires.
+psutil>=5.9

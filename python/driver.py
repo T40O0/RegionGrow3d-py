@@ -253,6 +253,29 @@ def _write_sus_raster(sus, Z, georef, out_dir, susname):
     return out_path
 
 
+def _write_intermediate_rasters(out_dir, depth, nogrow_io, PGA, Z, georef):
+    """Materialize the resolved inputs (soil depth, no-grow mask, PGA) — whether
+    loaded from a .mat or computed — plus a hillshade as GeoTIFFs in out_dir.
+
+    These back the web UI's map-preview layers. Shared by the normal run path
+    and the tension/compression post-process so that in parallel (--run-index)
+    mode — where each phi run writes to a throwaway per-run out_dir that is
+    discarded after aggregation — the final combined directory still ends up
+    with these rasters (the final tension/compression pass writes them there).
+    """
+    from region3d.derivatives import hillshade as _hillshade
+    print("Writing intermediate rasters (depth/nogrow/PGA/hillshade)...")
+    write_raster(out_dir / 'depth.tif', depth.astype(np.float32), georef)
+    write_raster(out_dir / 'nogrow_io.tif',
+                 nogrow_io.astype(np.float32), georef)
+    write_raster(out_dir / 'PGA.tif', PGA.astype(np.float32), georef)
+    try:
+        hs = _hillshade(Z, georef.x_ext, georef.y_ext)
+        write_raster(out_dir / 'hillshade.tif', hs.astype(np.float32), georef)
+    except Exception as exc:
+        print(f"  hillshade failed: {exc}")
+
+
 def _tension_compression(args, Z, georef, subdx, subdy, W, sigma_s, PGA,
                          prob, prob_phi, prob_coh, susname, out_dir):
     """Probability-weighted per-cell net driving force q (tension/compression).
@@ -664,6 +687,13 @@ def _run_impl(args):
     if int(getattr(args, 'tension_compression', 0)):
         print("Tension/compression mode: per-cell net force q, prob-weighted "
               "over runs (no region-grow).")
+        # In parallel (--run-index) mode this final post-process is the only
+        # driver pass that writes to the real (combined) out_dir, so emit the
+        # input rasters here too — otherwise they only ever land in the
+        # discarded per-run dirs and the web UI shows "(file not available)".
+        # Written before the net-force pass so they survive a failure in it.
+        if int(args.save_intermediates):
+            _write_intermediate_rasters(out_dir, depth, nogrow_io, PGA, Z, georef)
         _tension_compression(args, Z, georef, subdx, subdy, W, sigma_s, PGA,
                              prob, prob_phi, prob_coh, susname, out_dir)
         print(f"Total elapsed: {(time.time()-t0)/60.0:.2f} min")
@@ -724,18 +754,7 @@ def _run_impl(args):
     # identical across runs, so in single-run fan-out mode only index 0 writes
     # them (avoids N redundant hillshade computations).
     if int(args.save_intermediates) and args.run_index in (None, 0):
-        from region3d.derivatives import hillshade as _hillshade
-        print("Writing intermediate rasters (depth/nogrow/PGA/hillshade)...")
-        write_raster(out_dir / 'depth.tif', depth.astype(np.float32), georef)
-        write_raster(out_dir / 'nogrow_io.tif',
-                     nogrow_io.astype(np.float32), georef)
-        write_raster(out_dir / 'PGA.tif', PGA.astype(np.float32), georef)
-        try:
-            hs = _hillshade(Z, georef.x_ext, georef.y_ext)
-            write_raster(out_dir / 'hillshade.tif',
-                         hs.astype(np.float32), georef)
-        except Exception as exc:
-            print(f"  hillshade failed: {exc}")
+        _write_intermediate_rasters(out_dir, depth, nogrow_io, PGA, Z, georef)
 
     # Per-run cluster counts (read from diagnostics)
     if diagnostics_per_run:
