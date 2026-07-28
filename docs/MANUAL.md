@@ -152,28 +152,78 @@ failure surfaces clean enough for Janbu". The cluster grow loop (c) below
 operates on this set.
 
 #### (c) Cluster grow loop — one cluster at a time
-For each cluster `C`, iterate until force closure:
 
-1. **3-D Janbu check**: treat the cluster as one rigid body, find the
-   dominant sliding direction `α_C`, and compute
+Each cluster grows by adding downslope columns until **force closure** is
+reached. Closure is a **vector sum** (x and y components) of three
+contributions ([forces.py:138](../python/region3d/forces.py),
+[region_grow.py:260](../python/region3d/region_grow.py)):
 
-   ```
-   F = Σ_C (c·A_i + (N_i − U_i)·tan(φ)) · cos(α_i) / cos(α_C)
-   D = Σ_C N_i · sin(α_C)  +  PGA · Σ_C W_i
-   err = D − F
-   ```
+1. **Column net forces ΣQ** — each column's Q (same formula as (a)) resolved
+   into x/y along that column's own basal dip direction (deflected uniformly
+   by the rotation search below).
+2. **Boundary prism (wedge) forces** — the ring of triangular prisms around
+   the perimeter (below).
+3. **Root resistance F_roots** — boundary length × S_roots, subtracted from
+   the closure error.
 
-   If `err ≤ 0` the cluster is balanced — freeze it into `slides_final_io`.
+The cluster is accepted as stable when
+`err = |ΣQ_columns + ΣQ_prisms| − F_roots` falls below
+`err_percent_allowable` % (default 1 %) of the total weight including the
+prisms. Otherwise downslope columns are added and the test repeats, until
+`max_growth_cycles` (default 120) or a sustained error increase
+(`err_increase_thresh`) terminates the loop. Growth is blocked in any
+direction that hits a `no_grow` cell.
 
-2. **Add wedges**: probe the boundary at 8 rotation angles spanning ±20°
-   (`rot_num`, `rot_range`), build alpha-shapes of candidate "wedge" cell
-   sets, and pick the wedge that minimises `err`.
+#### (c-1) Boundary prisms — full perimeter, active/passive earth pressure
 
-3. **Boundary check**: if the wedge crosses any `no_grow` cell it is
-   rejected; the cluster cannot grow in that direction.
+Prisms are built around the **entire perimeter**: the outer boundary is
+traced as a closed loop ([boundary.py:494](../python/region3d/boundary.py))
+and every pair of adjacent boundary vertices gets one triangular prism.
+Active vs. passive behaviour is expressed by **interpolating the wedge base
+angle α with the orientation ω relative to the direction of sliding**
+([boundary.py:534-543](../python/region3d/boundary.py); eqs. 14-15 of the
+paper):
 
-4. The loop terminates after `max_growth_cycles` (default 120), when `err`
-   starts increasing again, or under other termination conditions.
+```
+ω = (centroid→boundary direction) − direction of sliding (DOS)
+ω = 0°   (toe):   α = 45° − φ/2   Rankine passive — long, high-volume wedge
+ω = 180° (head):  α = 45° + φ/2   Rankine active  — short, steep wedge
+flanks:           linear interpolation
+```
+
+Each prism's net force is computed with the same signed Janbu-type base
+equilibrium as the columns ([forces.py:94](../python/region3d/forces.py));
+positive force points into the cluster, so the head prism acts as an active
+driving thrust and the toe prism as a passive buttress automatically. The
+seismic term is distributed as `k·(−cos ω)`, adding drive at the head and
+reducing the passive resistance at the toe. DOS is the azimuth of the
+resultant of the column forces, `atan2(ΣQy, ΣQx)`. The paper itself notes
+this interpolation is a simplification (e.g. a T-shaped cluster can have
+passive prisms away from the toe).
+
+#### (c-2) Rotation search — sliding-direction uncertainty (±20°, 8 states)
+
+Closure is not tested once but for **8 force fields with the sliding
+direction deflected** ([forces.py:186](../python/region3d/forces.py)
+`project_slope`):
+
+- Each column's force is turned to "**its own aspect + rot**". The same rot
+  is added to every column, so the azimuthal spread between columns (e.g.
+  convergence in a hollow) is preserved and the whole field swings together —
+  this is **not** an alignment to one common compass direction.
+- The apparent dip in the deflected direction shrinks to |∇z|·cos(rot).
+- rot takes the 8 values of `linspace(−20°, +20°, 8)` (±2.9°, ±8.6°, ±14.3°,
+  ±20°; **0° is not among them** — the unrotated field is used only for the
+  initial instability screen in (a)).
+- The **minimum** closure error over the 8 states decides: balanced in any
+  one orientation ⇒ stable.
+
+This procedure is specific to RegionGrow3D: Mathews et al. (2024) introduce
+it "to account for uncertainty in the cluster's direction of sliding",
+without a mechanical derivation or prior-work citation, and the range is a
+free parameter (`--rot_range` / `--rot_num`). It differs from classical 3-D
+limit-equilibrium formulations that solve for a single unknown sliding
+direction of the whole mass (e.g. Lam & Fredlund 1993).
 
 #### (d) Role of the no-grow mask
 `no_grow_io` is a binary mask that **clusters are forbidden to cross**.
