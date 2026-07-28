@@ -447,11 +447,26 @@ Key options:
 | `--out_dir PATH` | `python/output` | parent output dir |
 | `--soil_moisture_mode 0\|1` | `1` | 0=dry / 1=hydrostatic |
 | `--mw FLOAT` | `0.5` | saturation ratio (mode 1) |
-| `--soil_depth_mode 1\|2` | `1` | 1=Roering / 2=uniform |
+| `--soil_depth_mode 1\|2` | `1` | 1=hillslope model / 2=uniform |
 | `--soil_depth_uniform FLOAT` | `2.0` | uniform soil depth [m] |
 | `--soil_depth_endtime FLOAT` | `5000.0` | Roering simulation duration [yr] |
 | `--soil_depth_source mat\|compute` | `mat` | load .mat / compute in Python |
 | `--soil_depth_mat PATH` | `lib/soil_depth/<DEM_stem>_soil_depth.mat` | source path when source=mat |
+| `--soil_depth_model roering\|massbalance` | `roering` | model used when source=compute — see §5.2 |
+| `--soil_depth_mb_preset oregon\|matsushi` | (empty) | massbalance: published parameter set; individual options override it |
+| `--soil_depth_mb_tag STR` | (empty, defaults to the preset name) | massbalance: suffix for the saved .mat/.tif |
+| `--soil_depth_mb_hollow_endtime FLOAT` | `0.0` | massbalance: with `endtime 0`, years of refill given to convergent cells (hollows) |
+| `--soil_depth_mb_E0 FLOAT` | `720.0` | massbalance: bare-bedrock soil production rate E₀ [g m⁻² yr⁻¹] |
+| `--soil_depth_mb_alpha FLOAT` | `3.0` | massbalance: production decay with thickness α [m⁻¹] |
+| `--soil_depth_mb_K FLOAT` | `0.005` | massbalance: creep transport coefficient K [m² yr⁻¹] |
+| `--soil_depth_mb_Sc FLOAT` | `1.25` | massbalance: critical gradient S_c (non-linear law only) |
+| `--soil_depth_mb_rho_soil FLOAT` | `1200.0` | massbalance: soil bulk density ρ_soil [kg m⁻³] |
+| `--soil_depth_mb_W FLOAT` | `0.0` | massbalance: chemical mass loss from the soil W_soil [g m⁻² yr⁻¹] |
+| `--soil_depth_mb_transport nonlinear\|linear` | `nonlinear` | massbalance: transport law (eq.10 / eq.9) |
+| `--soil_depth_mb_endtime FLOAT` | `5000.0` | massbalance: duration [yr]; `0` = steady state |
+| `--soil_depth_mb_h_init FLOAT` | `0.0` | massbalance: initial soil thickness [m] |
+| `--soil_depth_mb_h_max FLOAT` | `3.0` | massbalance: upper cap on soil thickness [m] |
+| `--soil_depth_mb_smooth FLOAT` | `1.0` | massbalance: Gaussian DEM pre-smoothing σ [cells] |
 | `--nogrow_mode 0\|1` | `1` | 0=off / 1=ridge+valley |
 | `--nogrow_source mat\|compute\|grass` | `mat` | `grass` = original r.slopeunits (Docker) |
 | `--no_grow_mat PATH` | `lib/no_grow/<DEM_stem>_no_grow.mat` | source path when source=mat |
@@ -550,12 +565,92 @@ hillshade) are written once, by `--run-index 0`.
 In mode 1, `mw=0.5` means "the bottom half of the soil column is saturated"
 — the water table sits at depth/2 above the slip surface.
 
-### 5.2 `soil_depth_mode`
+### 5.2 `soil_depth_mode` / `soil_depth_model`
 
 | Value | Behaviour |
 |---|---|
-| **1 = Roering** | non-linear hillslope evolution (Roering 2008) for `soil_depth_endtime` years (Numba-JIT) |
+| **1 = hillslope model** | compute the model selected by `--soil_depth_model` (with `--soil_depth_source compute`), or load a `.mat` |
 | **2 = uniform** | depth = `soil_depth_uniform` everywhere |
+
+Model choice when `--soil_depth_source compute`:
+
+| `--soil_depth_model` | Description |
+|---|---|
+| **`roering`** (default) | Non-linear hillslope evolution (Roering 2008) for `soil_depth_endtime` years — the port of `lib/functions/soil_depth.m` (Numba-JIT). Evolves the *topography*; because it starts from a uniform 1 m soil mantle the absolute thickness stays dominated by that initial condition and only the spatial pattern is meaningful. Hours for a 60M-cell 5 m DEM. |
+| **`massbalance`** | Soil-production function + mass balance as formulated in 松四雄騎 / Matsushi (2017), *Journal of Geography* 126(4), 487–511, eq. (7)–(15), and applied to a Japanese granite watershed by Matsushi et al. (2016), *Trans. Jpn. Geomorph. Union* 37, 427–453. Holds the **measured DEM fixed** and solves for the thickness `h` only. |
+
+#### The massbalance model
+
+Mass balance (eq. 7) `ρ_soil·∂h/∂t = E_sap − ∇·q − W_soil`, soil production function (eq. 13)
+`E_sap = E₀·exp(−α·h)`, and creep transport that is either non-linear (eq. 10)
+`q = −ρ_soil·K·∇z / (1−(|∇z|/S_c)²)` or linear (eq. 9) `q = −ρ_soil·K·∇z`.
+
+With the DEM held fixed, `D ≡ ∇·q + W_soil` is a constant map, so the per-cell ODE has a closed-form
+solution and no time loop is required:
+
+- steady state (`--soil_depth_mb_endtime 0`, eq. 14/15): `h = −(1/α)·ln(D/E₀)`
+- transient (after `t` years from `h₀`): `h = (1/α)·ln( [E₀ − (E₀ − D·e^{αh₀})·e^{−αDt/ρ_soil}] / D )`
+
+Divergent (convex, ridge/nose) cells have `D > 0` and reach a steady thickness; convergent (hollow)
+cells have `D ≤ 0`, never reach steady state and keep accumulating soil, capped by
+`--soil_depth_mb_h_max`. That matches the behaviour reported by Matsushi et al. (2016): noses mostly
+below 0.5 m at steady state, hollows growing to ~1.2 m over a few hundred years.
+
+#### Parameter sets (`--soil_depth_mb_preset`)
+
+| | `oregon` (= the plain defaults) | `matsushi` |
+|---|---|---|
+| E₀ [g m⁻² yr⁻¹] | 720 | **896** (derived) |
+| α [m⁻¹] | 3.0 | 3.0 (mid of the 1–5 range) |
+| K [m² yr⁻¹] | 0.005 | **0.0092** (= K/L × L) |
+| S_c | 1.25 | **1.0** |
+| ρ_soil [kg m⁻³] | 1200 | **1900** |
+| W_soil [g m⁻² yr⁻¹] | 0 | **66.8** |
+
+The bold `matsushi` values are measurements for Japanese granitic watersheds (Abukuma, Rokko,
+eastern Northern Alps) published in **松四雄騎・松崎浩之・牧野久識 / Matsushi, Matsuzaki & Makino
+(2014), *Transactions, Japanese Geomorphological Union* 35(2), 165–183**, p.181 and Fig. 5:
+S_c ≈ 1 (critical gradient near 45°), K/L = 7×10⁻⁵–3×10⁻⁴ m yr⁻¹, ρ_rock = 2.6×10⁶ g m⁻³,
+ρ_soil = 1.9×10⁶ g m⁻³, W = 66.8 g m⁻² yr⁻¹, basin denudation D = 2.0×10²–1.8×10⁴ g m⁻² yr⁻¹.
+
+K is published as K/L (L = hillslope length), so L has to be measured on the target DEM. For the
+Noto 5 m DEM the median distance to a 10 ha channel head is **L = 131 m** → K = 0.0092–0.039 m² yr⁻¹
+(the preset takes the lower bound). `python/_viz_soil_depth_transects.py` prints L.
+
+> ⚠ **E₀ and α are not Matsushi's published values.** They are in Matsushi et al. (2016),
+> *Trans. Jpn. Geomorph. Union* 37, 427–453, which is paywalled (14.9 MB PDF). Here E₀ is derived
+> from that paper's abstract ("soil thickness reaches a steady-state on nose at mostly thinner than
+> 0.5 m") plus the slowest Japanese basin denudation rate above: E₀ = 200·exp(3 × 0.5) ≈ 896
+> g m⁻² yr⁻¹. α is the middle of the published 1–5 m⁻¹ range (Larsen et al. 2014). Swap in the
+> original values with `--soil_depth_mb_E0/_alpha` when you have them.
+
+#### Hollows (`--soil_depth_mb_hollow_endtime`)
+
+A steady state only exists on divergent slopes (D > 0); **35.3 %** of the Noto DEM is convergent and
+would otherwise sit at `h_max`. With `--soil_depth_mb_endtime 0 --soil_depth_mb_hollow_endtime 750`
+divergent cells take the steady solution while convergent cells get the transient one — i.e. 750
+years of refill since the last shallow landslide (Matsushi et al. 2016 report a 700–800 yr return
+period).
+
+#### Cells steeper than S_c
+
+Cells with |∇z| ≥ (1−0.025)·S_c are transport-unlimited (landsliding) and are pinned to bare bedrock
+(h = h_min), and the non-linear divergence is evaluated with the analytic expansion used by
+`soil_depth.m`, `div = K[∇²z/den + num2/(S_c²·den²)]`, where `den` is the cell's own value.
+Differentiating the flux field numerically instead lets the clamped flux of over-steep cells inject a
+huge artificial convergence into their neighbours — a 54° cliff then ends up with 3 m of soil. This
+is the divergence Matsushi et al. (2014, p.180) describe for cells with |∇z| > S_c.
+
+Example (Noto 5 m DEM, 61.9M valid cells, ~69 s):
+
+```bash
+python python/precompute_inputs.py --DEM_path lib/DEM/dem_afterEQ_5m_crop.tif --soil_depth_model massbalance --soil_depth_mb_preset matsushi --soil_depth_mb_endtime 0 --soil_depth_mb_hollow_endtime 750 --soil_depth_mb_smooth 3
+```
+
+Output goes to `lib/soil_depth/<DEM>_soil_depth_python_massbalance_matsushi.mat` (+ QA GeoTIFF); the
+Roering output (`..._soil_depth_python.mat`) is a different filename and is not overwritten. Result:
+mean 0.51 m, median 0.38 m, 95th pct 1.08 m, 61.9 % of cells below 0.5 m (Roering 5000 yr: mean
+1.14 m, median 1.07 m, 12.2 % below 0.5 m).
 
 ### 5.3 `soil_strength_mode`
 
@@ -985,3 +1080,53 @@ nogrow = load_no_grow('no_grow.mat')        # dict
 - Schwanghart, W., & Scherler, D. (2014). TopoToolbox 2 — MATLAB-based
   software for topographic analysis and modeling. *Earth Surface Dynamics*,
   2, 1–7.
+
+### Soil-depth massbalance model (§5.2)
+
+Primary sources of the equations (the model itself):
+
+- Dietrich, W. E., Reiss, R., Hsu, M.-L., & Montgomery, D. R. (1995). A
+  process-based model for colluvial soil depth and shallow landsliding using
+  digital elevation data. *Hydrological Processes*, 9, 383–400.
+  → soil mass balance, eq. (7) `ρ_soil ∂h/∂t = E_sap − ∇·q − W_soil`.
+- Heimsath, A. M., Dietrich, W. E., Nishiizumi, K., & Finkel, R. C. (1997). The
+  soil production function and landscape equilibrium. *Nature*, 388, 358–361.
+  → soil production function, eq. (13) `E_sap = E₀ exp(−α h)`.
+- Roering, J. J., Kirchner, J. W., & Dietrich, W. E. (1999). Evidence for
+  nonlinear, diffusive sediment transport on hillslopes and implications for
+  landscape morphology. *Water Resources Research*, 35, 853–870.
+  → non-linear soil creep, eq. (10) `q = −ρ_soil K ∇z / {1 − (|∇z|/S_c)²}`.
+  The linear law, eq. (9), is McKean et al. (1993) / Small et al. (1999).
+- Larsen, I. J., Almond, P. C., Eger, A., Stone, J. O., Montgomery, D. R., &
+  Malcolm, B. (2014). Rapid soil production and weathering in the Southern Alps,
+  New Zealand. *Science*, 343, 637–640.
+  → source of the published ranges E₀ = 10¹–10³ g m⁻² yr⁻¹ and α = 1–5 m⁻¹.
+
+Formulation followed here, and the Japanese parameters:
+
+- Matsushi, Y. / 松四雄騎 (2017). Quantification of long-term rates of bedrock
+  weathering and soil production using terrestrial cosmogenic nuclides:
+  principles, methodology, current research status, and perspectives.
+  *Journal of Geography (Chigaku Zasshi)*, 126(4), 487–511.
+  doi:10.5026/jgeography.126.487 (in Japanese with English abstract)
+  → the formulation: mass balance eq. (7), transport laws eq. (9)/(10), soil
+  production function eq. (13), steady-state forms eq. (14)/(15).
+- Matsushi, Y., Matsuzaki, H., & Makino, H. / 松四雄騎・松崎浩之・牧野久識
+  (2014). Testing models of landform evolution by determining the denudation
+  rates of mountainous watersheds using terrestrial cosmogenic nuclides.
+  *Transactions, Japanese Geomorphological Union*, 35(2), 165–185.
+  (in Japanese with English abstract)
+  → source of the `matsushi` preset: W = 66.8 g m⁻² yr⁻¹, ρ_rock = 2.6×10⁶ and
+  ρ_soil = 1.9×10⁶ g m⁻³ (p.181), S_c = 0.9–1.2 and K/L = 7×10⁻⁵–3×10⁻⁴ m yr⁻¹
+  and basin denudation 2.0×10²–1.8×10⁴ g m⁻² yr⁻¹ (Fig. 5). Open access on
+  J-STAGE.
+- Matsushi, Y., Toyama, M., Matsuzaki, H., & Chigira, M. / 松四雄騎・外山 真・
+  松崎浩之・千木良雅弘 (2016). Simulation of soil production and transport for
+  prediction of location and magnitude of shallow landslides. *Transactions,
+  Japanese Geomorphological Union*, 37(4), 427–453.
+  (in Japanese with English abstract)
+  → application to a granite watershed near Kyoto; the source of the figures E₀
+  was derived from (steady nose soil mostly < 0.5 m, hollows filling to ~1.2 m
+  in a few hundred years, 700–800 yr shallow-landslide return period).
+  **The calibrated E₀ and α are in this paper but it is paywalled (J-STAGE,
+  14.9 MB PDF) and was not obtained.**

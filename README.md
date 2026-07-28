@@ -162,6 +162,7 @@ RegionGrow3d-py/
 | `saveraster.m` + MATLAB `geotiffread` | `python/region3d/io.py` |
 | MATLAB `bwmorph`, `bwconncomp`, `bwboundaries` (Image-Processing Toolbox) | `python/region3d/bwmorph.py`, `python/region3d/matlab_compat.py` |
 | *(new — no MATLAB counterpart)* slope-unit segmentation via the original GRASS r.slopeunits (Alvioli 2016/2020) | `python/region3d/grass_slopeunits.py` (Docker) |
+| *(new — no MATLAB counterpart)* soil-production function + mass-balance soil thickness (松四 2017 / Matsushi et al. 2016) | `python/region3d/soil_production.py` |
 | *(new — no MATLAB counterpart)* persistent run-state for the Streamlit UI | `python/region3d/runner.py` |
 
 The Python sources keep the MATLAB function name in their module docstring so
@@ -175,7 +176,8 @@ the lineage is traceable from the code as well.
 | Mode | Values | Python support |
 |---|---|---|
 | `soil_moisture_mode` | 0=dry / 1=hydrostatic (mw) / 2=hydromechanical | ✅ / ✅ / ❌ |
-| `soil_depth_mode` | 1=Roering / 2=uniform | ✅ / ✅ |
+| `soil_depth_mode` | 1=hillslope model / 2=uniform | ✅ / ✅ |
+| `soil_depth_model` (when mode=1 + source=compute) | roering (Roering 2008) / massbalance (soil-production function + mass balance, 松四 2017) | ✅ / ✅ *(new — no MATLAB counterpart)* |
 | `soil_strength_mode` | 1=distribution / 2=uniform | ✅ / ✅ |
 | `nogrow_mode` | 0=off / 1=on | ✅ / ✅ |
 | `nogrow_source` (when mode=1) | mat / compute (acc-threshold) / grass (original r.slopeunits, Docker) | ✅ / ✅ / ✅ |

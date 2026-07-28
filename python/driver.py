@@ -31,6 +31,19 @@ Seismic options (driver.m lines 84-92, 295-313):
   --uniform_PGA <g>                   (used when seismic_mode='uniform')
   --PGA_path  <tif>                   (used when seismic_mode='raster')
   --pseudo_scaling <s>                (multiplier applied to PGA, default 1.0)
+
+Soil-depth model (used when --soil_depth_source=compute):
+  --soil_depth_model roering|massbalance
+      roering     : lib/functions/soil_depth.m — Roering (2008) landscape
+                    evolution, Oregon Coast Range constants, hours of runtime.
+      massbalance : soil-production function + mass balance as formulated in
+                    松四雄騎 (2017) 地学雑誌 126(4), 487-511 eq.(7)-(15) and
+                    applied in 松四ほか (2016) 地形 37, 427-453. The measured
+                    DEM is held fixed and the thickness is solved in closed
+                    form, so there is no dependence on an assumed initial soil
+                    mantle and a 60M-cell DEM takes ~1 minute. Tune it with
+                    --soil_depth_mb_E0 / _alpha / _K / _Sc / _rho_soil / _W /
+                    _transport / _endtime / _h_init / _h_max / _smooth.
 """
 from __future__ import annotations
 
@@ -63,6 +76,9 @@ from region3d.matlab_compat import find_F
 from region3d.region_grow import region_grow_fxn
 from region3d.preprocessing import (soil_depth as compute_soil_depth,
                                     ridges_valleys as compute_ridges_valleys)
+from region3d.soil_production import (MASSBALANCE_ALIASES,
+                                      params_from_namespace,
+                                      soil_depth_massbalance)
 
 
 # Sample-name-free defaults. DEM_path / test_no are required (see main()).
@@ -124,8 +140,33 @@ DEFAULTS = dict(
     PGA_path='',                 # GeoTIFF path; used when seismic_mode='raster'
     pseudo_scaling=1.0,          # scaling factor applied to PGA
     # ---- Soil depth (driver.m line 103-104) -------------------------------------
-    soil_depth_mode=1,           # 1 = Roering hillslope evolution | 2 = uniform
+    soil_depth_mode=1,           # 1 = hillslope-evolution model | 2 = uniform
     soil_depth_uniform=2.0,      # used when soil_depth_mode=2 (units: m)
+    # ---- Soil-depth model (only when soil_depth_source='compute') ---------------
+    #   'roering'     = lib/functions/soil_depth.m (Roering 2008 landscape
+    #                   evolution; Oregon Coast Range constants, starts from a
+    #                   uniform 1 m mantle)
+    #   'massbalance' = soil-production function + mass balance as formulated in
+    #                   松四 (2017) 地学雑誌 126(4), 487-511, eq.(7)-(15);
+    #                   fixed (measured) topography, closed-form solution
+    soil_depth_model='roering',
+    soil_depth_mb_preset='',      # '' | 'oregon' | 'matsushi' (published sets;
+                                  # individual --soil_depth_mb_* still override)
+    soil_depth_mb_tag='',         # suffix for the saved .mat/.tif (e.g. 'matsushi')
+    soil_depth_mb_E0=720.0,        # bare-bedrock soil production rate [g m-2 yr-1]
+    soil_depth_mb_alpha=3.0,       # production decay with thickness [m-1]
+    soil_depth_mb_K=0.005,         # soil-creep transport coefficient [m2 yr-1]
+    soil_depth_mb_Sc=1.25,         # critical gradient (non-linear creep law)
+    soil_depth_mb_rho_soil=1200.0, # soil bulk density [kg m-3]
+    soil_depth_mb_W=0.0,           # chemical mass loss from the soil [g m-2 yr-1]
+    soil_depth_mb_transport='nonlinear',  # 'nonlinear' (eq.10) | 'linear' (eq.9)
+    soil_depth_mb_endtime=5000.0,  # 0 = steady state, else transient length [yr]
+    soil_depth_mb_hollow_endtime=0.0,  # >0 with endtime=0: convergent cells get
+                                   # this many years of refill instead of h_max
+                                   # (set to the landslide return period)
+    soil_depth_mb_h_init=0.0,      # initial soil thickness of the transient [m]
+    soil_depth_mb_h_max=3.0,       # upper cap on soil thickness [m]
+    soil_depth_mb_smooth=1.0,      # Gaussian DEM pre-smoothing before d/dx [cells]
     # ---- Soil strength (driver.m line 107-112) ----------------------------------
     soil_strength_mode=1,        # 1 = distribution (.mat) | 2 = uniform single (phi,c)
     phi_uniform=25.0,            # friction angle for uniform mode (deg)
@@ -467,19 +508,48 @@ def _run_impl(args):
         print(f"Assigning uniform soil depth = {args.soil_depth_uniform} m ...")
         depth = np.full(Z.shape, np.float32(args.soil_depth_uniform), dtype=np.float32)
     elif args.soil_depth_source == 'compute':
-        print(f"Computing soil depth (Roering, {args.soil_depth_endtime} yr) ...",
-              flush=True)
         t_sd = time.time()
-        depth = compute_soil_depth(Z, georef.x_cellsize,
-                                   endtime=args.soil_depth_endtime,
-                                   verbose=True)
+        model = str(args.soil_depth_model or 'roering').lower()
+        if model in MASSBALANCE_ALIASES:
+            mb_endtime = float(args.soil_depth_mb_endtime)
+            mb_hollow = float(args.soil_depth_mb_hollow_endtime)
+            when = 'steady state' if mb_endtime <= 0 else f'{mb_endtime:.0f} yr'
+            if mb_endtime <= 0 and mb_hollow > 0:
+                when += f' + hollows refilled for {mb_hollow:.0f} yr'
+            mb_params = params_from_namespace(args)
+            print(f"Computing soil depth (soil-production function + mass "
+                  f"balance, {when}) ...", flush=True)
+            print(f"  params: E0={mb_params.E0:.0f} g/m2/yr "
+                  f"alpha={mb_params.alpha:g} /m K={mb_params.K:g} m2/yr "
+                  f"Sc={mb_params.Sc:g} rho_soil={mb_params.rho_soil:.0f} kg/m3 "
+                  f"W={mb_params.W_soil:g} g/m2/yr "
+                  f"({mb_params.transport})", flush=True)
+            depth = soil_depth_massbalance(
+                Z, georef.x_cellsize, georef.y_cellsize,
+                params=mb_params,
+                endtime=None if mb_endtime <= 0 else mb_endtime,
+                hollow_endtime=mb_hollow if mb_hollow > 0 else None,
+                h_init=float(args.soil_depth_mb_h_init),
+                h_max=float(args.soil_depth_mb_h_max),
+                smooth_sigma=float(args.soil_depth_mb_smooth),
+                verbose=True)
+            extra = str(args.soil_depth_mb_tag or
+                        args.soil_depth_mb_preset or '').strip()
+            sd_tag = '_massbalance' + (f'_{extra}' if extra else '')
+        else:
+            print(f"Computing soil depth (Roering, {args.soil_depth_endtime} yr) ...",
+                  flush=True)
+            depth = compute_soil_depth(Z, georef.x_cellsize,
+                                       endtime=args.soil_depth_endtime,
+                                       verbose=True)
+            sd_tag = ''
         depth = depth.astype(np.float32)
         print(f"  done in {time.time()-t_sd:.1f}s "
               f"(mean={float(np.nanmean(depth)):.3f} m)", flush=True)
         # Save the result back to .mat so the user can later choose `mat` mode.
         from scipy.io import savemat
         sd_save = REPO_ROOT / 'lib' / 'soil_depth' / \
-            f"{Path(args.DEM_path).stem}_soil_depth_python.mat"
+            f"{Path(args.DEM_path).stem}_soil_depth_python{sd_tag}.mat"
         sd_save.parent.mkdir(parents=True, exist_ok=True)
         savemat(str(sd_save), {'depth': depth.astype(np.float64)})
         print(f"  saved: {sd_save.relative_to(REPO_ROOT).as_posix()}", flush=True)

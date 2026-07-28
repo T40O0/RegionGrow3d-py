@@ -146,11 +146,16 @@ else:
 
 # ---- 2. Soil depth ----------------------------------------------------------
 soil_depth_mode = st.sidebar.radio(
-    "🟫 Soil depth", ["1 = Roering evolution model", "2 = Uniform"], index=0,
+    "🟫 Soil depth", ["1 = Hillslope model", "2 = Uniform"], index=0,
     key='soil_depth_mode_radio', disabled=DIS)
 soil_depth_mode = int(soil_depth_mode.split(' ')[0])
 soil_depth_source = 'mat'
 soil_depth_mat = ''
+# massbalance-model defaults (overridden below when that model is selected)
+soil_depth_model = 'roering'
+mb = dict(E0=720.0, alpha=3.0, K=0.005, Sc=1.25, rho_soil=1200.0, W=0.0,
+          transport='nonlinear', endtime=5000.0, hollow_endtime=0.0,
+          h_init=0.0, h_max=3.0, smooth=3.0, preset='')
 if soil_depth_mode == 2:
     soil_depth_uniform = st.sidebar.number_input(
         "  Uniform soil depth (m)", 0.1, 10.0, 2.0, 0.1, key='soil_depth_uniform',
@@ -189,12 +194,92 @@ else:
             soil_depth_mat = str(SOIL_DEPTH_DIR / sel)
             soil_depth_endtime = 5000.0
     else:
-        soil_depth_endtime = st.sidebar.number_input(
-            "  Roering simulation duration (yr)",
-            1000.0, 20000.0, 5000.0, 1000.0, key='soil_depth_endtime',
-            help="Saved to `lib/soil_depth/<DEM>_soil_depth_python.mat` "
-                 "after the run.",
-            disabled=DIS)
+        soil_depth_model = st.sidebar.radio(
+            "  Soil-depth model",
+            ["🇺🇸 Roering landscape evolution (Oregon 定数)",
+             "🇯🇵 土層生成関数＋物質収支 (松四 2017)"],
+            index=0, key='soil_depth_model_radio', disabled=DIS,
+            help="Roering: `lib/functions/soil_depth.m` の移植。地形を 5000 年"
+                 "発展させる（初期土層厚 1 m に依存・数時間）。\n\n"
+                 "松四モデル: 松四雄騎 (2017) 地学雑誌 126(4) 式(7)-(15) の "
+                 "土層生成関数 E=E0·exp(-αh) と物質収支を、実測地形を固定した"
+                 "まま解析的に解く（初期値に依存しない・約1分）。")
+        soil_depth_model = ('roering'
+                            if soil_depth_model.startswith('🇺🇸')
+                            else 'massbalance')
+        if soil_depth_model == 'roering':
+            soil_depth_endtime = st.sidebar.number_input(
+                "  Roering simulation duration (yr)",
+                1000.0, 20000.0, 5000.0, 1000.0, key='soil_depth_endtime',
+                help="Saved to `lib/soil_depth/<DEM>_soil_depth_python.mat` "
+                     "after the run.",
+                disabled=DIS)
+        else:
+            soil_depth_endtime = 5000.0
+            preset_label = st.sidebar.selectbox(
+                "  パラメータセット",
+                ["🇯🇵 松四 (日本・花崗岩流域)", "🇺🇸 Oregon 換算", "✏ カスタム"],
+                index=0, key='mb_preset', disabled=DIS,
+                help="松四: 松四ほか (2014) 地形 35(2) p.181/Fig.5 の日本の花崗岩"
+                     "流域の実測値 — Sc≈1.0, K/L=7e-5–3e-4 m/yr, ρ_soil=1900 "
+                     "kg/m³, W=66.8 g m⁻² yr⁻¹。E₀/α は未公表のため導出値 "
+                     "(E₀=896, α=3)。\n\n"
+                     "Oregon 換算: soil_depth.m のオレゴン定数を質量単位に換算。")
+            mb['preset'] = ('matsushi' if preset_label.startswith('🇯🇵')
+                            else 'oregon' if preset_label.startswith('🇺🇸')
+                            else '')
+            mb['endtime'] = st.sidebar.number_input(
+                "  シミュレーション期間 (yr, 0=定常解)",
+                0.0, 100000.0, 0.0 if mb['preset'] == 'matsushi' else 5000.0,
+                500.0, key='mb_endtime', disabled=DIS,
+                help="0 を指定すると定常解 h=-(1/α)ln(D/E0)。谷頭凹地は定常解を"
+                     "持たないため、下の「凹地の再堆積期間」で埋めるか h_max で"
+                     "頭打ちになります。")
+            mb['hollow_endtime'] = st.sidebar.number_input(
+                "  凹地の再堆積期間 (yr, 0=無効・定常解時のみ)",
+                0.0, 20000.0, 750.0 if mb['preset'] == 'matsushi' else 0.0,
+                50.0, key='mb_hollow', disabled=DIS,
+                help="定常解を持たない収束セル (谷頭凹地) に、最終崩壊からの"
+                     "経過時間ぶんだけ土層を堆積させます。松四ほか (2016) の"
+                     "表層崩壊再来間隔は 700–800 年。")
+            if mb['preset']:
+                st.sidebar.caption(
+                    f"  ℹ プリセット `{mb['preset']}` の E₀/α/K/S_c/ρ/W を使用します"
+                    "（個別入力は「カスタム」を選択）。")
+            mb['smooth'] = st.sidebar.number_input(
+                "  DEM 平滑化 σ (セル, 0=なし)", 0.0, 5.0, 3.0, 0.5,
+                key='mb_smooth', disabled=DIS,
+                help="曲率は 5 m DEM ではセルスケールのノイズに支配されるため "
+                     "3 セル (15 m) 程度を推奨。")
+            mb['h_max'] = st.sidebar.number_input(
+                "  土層厚の上限 h_max (m)", 0.5, 20.0, 3.0, 0.5,
+                key='mb_hmax', disabled=DIS)
+        if soil_depth_model == 'massbalance' and not mb['preset']:
+            mb['E0'] = st.sidebar.number_input(
+                "  E₀ 裸岩の土層生成速度 (g m⁻² yr⁻¹)",
+                1.0, 5000.0, 720.0, 10.0, key='mb_E0', disabled=DIS,
+                help="既往研究のレンジ 10¹–10³ (Larsen et al. 2014)。")
+            mb['alpha'] = st.sidebar.number_input(
+                "  α 土層厚に対する減衰係数 (m⁻¹)",
+                0.1, 10.0, 3.0, 0.1, key='mb_alpha', disabled=DIS,
+                help="既往研究のレンジ 1–5 m⁻¹。")
+            mb['K'] = st.sidebar.number_input(
+                "  K ソイルクリープ輸送係数 (m² yr⁻¹)",
+                0.0001, 0.1, 0.005, 0.0005, format="%.4f",
+                key='mb_K', disabled=DIS)
+            mb['transport'] = st.sidebar.radio(
+                "  輸送則", ["nonlinear (式10)", "linear (式9)"], index=0,
+                key='mb_transport', disabled=DIS).split(' ')[0]
+            mb['Sc'] = st.sidebar.number_input(
+                "  S_c 限界勾配 (nonlinear のみ)", 0.2, 3.0, 1.25, 0.05,
+                key='mb_Sc', disabled=DIS)
+            mb['rho_soil'] = st.sidebar.number_input(
+                "  ρ_soil 土層かさ密度 (kg m⁻³)", 500.0, 2500.0, 1200.0, 50.0,
+                key='mb_rho', disabled=DIS)
+            mb['W'] = st.sidebar.number_input(
+                "  W_soil 元素溶脱速度 (g m⁻² yr⁻¹)", 0.0, 1000.0, 0.0, 5.0,
+                key='mb_W', disabled=DIS,
+                help="松四ほか (2014) の日本の花崗岩流域では 66.8。")
 
 # ---- 3. Shear strength parameters -------------------------------------------
 soil_strength_mode = st.sidebar.radio(
@@ -539,6 +624,20 @@ def _build_cmd():
            '--S_roots', str(S_roots),
            '--soil_depth_uniform', str(soil_depth_uniform),
            '--soil_depth_endtime', str(soil_depth_endtime),
+           '--soil_depth_model', soil_depth_model,
+           '--soil_depth_mb_E0', str(mb['E0']),
+           '--soil_depth_mb_alpha', str(mb['alpha']),
+           '--soil_depth_mb_K', str(mb['K']),
+           '--soil_depth_mb_Sc', str(mb['Sc']),
+           '--soil_depth_mb_rho_soil', str(mb['rho_soil']),
+           '--soil_depth_mb_W', str(mb['W']),
+           '--soil_depth_mb_transport', mb['transport'],
+           '--soil_depth_mb_endtime', str(mb['endtime']),
+           '--soil_depth_mb_hollow_endtime', str(mb['hollow_endtime']),
+           '--soil_depth_mb_h_init', str(mb['h_init']),
+           '--soil_depth_mb_h_max', str(mb['h_max']),
+           '--soil_depth_mb_smooth', str(mb['smooth']),
+           '--soil_depth_mb_preset', mb['preset'],
            '--phi_uniform', str(phi_uniform), '--coh_uniform', str(coh_uniform),
            '--uniform_PGA', str(uniform_PGA),
            '--pseudo_scaling', str(pseudo_scaling),

@@ -429,11 +429,26 @@ python python/driver.py --help
 | `--out_dir PATH` | `python/output` | 出力親ディレクトリ |
 | `--soil_moisture_mode 0\|1` | `1` | 0=乾燥 / 1=静水圧 |
 | `--mw FLOAT` | `0.5` | 飽和率 (mode=1) |
-| `--soil_depth_mode 1\|2` | `1` | 1=Roering / 2=一様 |
+| `--soil_depth_mode 1\|2` | `1` | 1=斜面モデル / 2=一様 |
 | `--soil_depth_uniform FLOAT` | `2.0` | 一様時の土層厚 [m] |
 | `--soil_depth_endtime FLOAT` | `5000.0` | Roering シミュ期間 [yr] |
 | `--soil_depth_source mat\|compute` | `mat` | .mat 読込 / Python 計算 |
 | `--soil_depth_mat PATH` | `lib/soil_depth/<DEM_stem>_soil_depth.mat` | mat ソース時の読込先 |
+| `--soil_depth_model roering\|massbalance` | `roering` | `compute` 時のモデル選択 — §5.2 参照 |
+| `--soil_depth_mb_preset oregon\|matsushi` | (空) | massbalance: 公表パラメータセット。個別指定が優先 |
+| `--soil_depth_mb_tag STR` | (空、既定はプリセット名) | massbalance: 出力 .mat/.tif の接尾辞 |
+| `--soil_depth_mb_hollow_endtime FLOAT` | `0.0` | massbalance: `endtime 0`(定常) 時、収束セル(凹地)に与える再堆積年数 |
+| `--soil_depth_mb_E0 FLOAT` | `720.0` | massbalance: 裸岩の土層生成速度 E₀ [g m⁻² yr⁻¹] |
+| `--soil_depth_mb_alpha FLOAT` | `3.0` | massbalance: 土層厚に対する減衰係数 α [m⁻¹] |
+| `--soil_depth_mb_K FLOAT` | `0.005` | massbalance: ソイルクリープ輸送係数 K [m² yr⁻¹] |
+| `--soil_depth_mb_Sc FLOAT` | `1.25` | massbalance: 限界勾配 S_c (非線形則のみ) |
+| `--soil_depth_mb_rho_soil FLOAT` | `1200.0` | massbalance: 土層かさ密度 ρ_soil [kg m⁻³] |
+| `--soil_depth_mb_W FLOAT` | `0.0` | massbalance: 土層からの元素溶脱速度 W_soil [g m⁻² yr⁻¹] |
+| `--soil_depth_mb_transport nonlinear\|linear` | `nonlinear` | massbalance: 輸送則 (式10 / 式9) |
+| `--soil_depth_mb_endtime FLOAT` | `5000.0` | massbalance: 期間 [yr]、`0`=定常解 |
+| `--soil_depth_mb_h_init FLOAT` | `0.0` | massbalance: 初期土層厚 [m] |
+| `--soil_depth_mb_h_max FLOAT` | `3.0` | massbalance: 土層厚の上限 [m] |
+| `--soil_depth_mb_smooth FLOAT` | `1.0` | massbalance: 微分前の DEM ガウス平滑 σ [セル]。**5 m DEM では 3 (=15 m) 推奨** |
 | `--nogrow_mode 0\|1` | `1` | 0=なし / 1=尾根+谷 |
 | `--nogrow_source mat\|compute\|grass` | `mat` | 同上 (`grass`=本家 r.slopeunits、Docker) |
 | `--no_grow_mat PATH` | `lib/no_grow/<DEM_stem>_no_grow.mat` | 同上 |
@@ -524,12 +539,93 @@ python python/driver.py --DEM_path <dem> --susname_override <susname> \
 
 mode=1 の `mw=0.5` は「土層厚の半分まで水で飽和」を意味します (詳細は要点ノート参照)。
 
-### 5.2 `soil_depth_mode`
+### 5.2 `soil_depth_mode` / `soil_depth_model`
 
 | 値 | 動作 |
 |---|---|
-| **1 = Roering** | Roering (2008) 非線形地形進化を `soil_depth_endtime` 年シミュレート (Numba JIT) |
+| **1 = 斜面モデル** | `--soil_depth_model` で選んだモデルを計算 (`--soil_depth_source compute`) または `.mat` を読込 |
 | **2 = 一様** | depth = `soil_depth_uniform` を全域に適用 |
+
+`--soil_depth_source compute` のときのモデル選択:
+
+| `--soil_depth_model` | 内容 |
+|---|---|
+| **`roering`** (既定) | Roering (2008) 非線形地形進化を `soil_depth_endtime` 年シミュレート (`lib/functions/soil_depth.m` の移植、Numba JIT)。地形そのものを時間発展させる。初期土層厚 1 m 一様から出発するため、**絶対値はこの初期条件に強く依存**し、空間パターンのみが意味を持つ。5 m DEM 6,000 万セルで数時間。 |
+| **`massbalance`** | 土層生成関数＋物質収支モデル。松四雄騎 (2017) 地学雑誌 126(4), 487‑511 の式 (7)–(15)、日本の花崗岩流域への適用は松四ほか (2016) 地形 37, 427‑453。**実測地形 (DEM) を固定**し、土層厚 h のみを解く。 |
+
+#### massbalance モデルの式
+
+物質収支 (式7) `ρ_soil·∂h/∂t = E_sap − ∇·q − W_soil`、土層生成関数 (式13) `E_sap = E₀·exp(−α·h)`、
+輸送則は非線形 (式10) `q = −ρ_soil·K·∇z / (1−(|∇z|/S_c)²)` または線形 (式9) `q = −ρ_soil·K·∇z`。
+
+DEM を固定するため `D ≡ ∇·q + W_soil` は時間によらない定数となり、時間ループ無しで解析解が得られる:
+
+- 定常解 (`--soil_depth_mb_endtime 0`, 式14/15): `h = −(1/α)·ln(D/E₀)`
+- 過渡解 (`endtime = t` 年, 初期 `h₀`): `h = (1/α)·ln( [E₀ − (E₀ − D·e^{αh₀})·e^{−αDt/ρ_soil}] / D )`
+
+発散斜面 (尾根・凸型、D>0) は定常厚に収束し、収束斜面 (谷頭凹地、D≤0) は定常解を持たず土層が
+堆積し続けます (`--soil_depth_mb_h_max` で頭打ち)。これは松四ほか (2016) が報告した
+「尾根部は 0.5 m 未満で定常、谷頭凹地は数百年で ~1.2 m まで増加」という描像に対応します。
+
+#### パラメータセット (`--soil_depth_mb_preset`)
+
+| | `oregon` (既定値と同じ) | `matsushi` |
+|---|---|---|
+| E₀ [g m⁻² yr⁻¹] | 720 | **896** (導出値) |
+| α [m⁻¹] | 3.0 | 3.0 (レンジ 1–5 の中央) |
+| K [m² yr⁻¹] | 0.005 | **0.0092** (= K/L × L) |
+| S_c | 1.25 | **1.0** |
+| ρ_soil [kg m⁻³] | 1200 | **1900** |
+| W_soil [g m⁻² yr⁻¹] | 0 | **66.8** |
+
+`matsushi` の太字は **松四雄騎・松崎浩之・牧野久識 (2014)「宇宙線生成核種による流域削剥速度の
+決定と地形方程式の検証」地形 35(2), 165–183** の p.181 本文と Fig.5 に載っている、日本の花崗岩
+流域 (阿武隈山地・六甲山地・北アルプス東縁) の実測値です:
+
+- S_c: 「傾斜 45°付近に臨界勾配が存在する (S_c 〜 1)」
+- K/L = 7×10⁻⁵ – 3×10⁻⁴ m yr⁻¹ (Fig.5 の理論曲線の上下包絡線)
+- ρ_r = 2.6×10⁶ g m⁻³、ρ_s = 1.9×10⁶ g m⁻³、ρ_r/ρ_s ≒ 1.4
+- W = 66.8 g m⁻² yr⁻¹ (basal chemical weathering rate)
+- 流域平均削剥速度 D = 2.0×10² – 1.8×10⁴ g m⁻² yr⁻¹ (最小は阿武隈山地)
+
+K は公表値が K/L (L = 斜面長) なので、対象 DEM で L を実測して換算します。能登 5 m DEM では
+谷頭定義 10 ha での「最近傍河道までの距離」の中央値が **L = 131 m** で、K = 0.0092–0.039 m² yr⁻¹
+(プリセットは下限値を採用)。L は `python/_viz_soil_depth_transects.py` が計算して表示します。
+
+> ⚠ **E₀ と α は松四らの公表値ではありません。** これらは松四ほか (2016) 地形 37, 427–453 の中に
+> ありますが同誌は有料 (PDF 14.9 MB) で取得できませんでした。ここでは同論文の抄録にある
+> 「尾根部の定常土層厚は概ね 0.5 m 未満」と、上記の最小削剥速度 2.0×10² g m⁻² yr⁻¹ から
+> E₀ = 200·exp(3×0.5) ≒ 896 g m⁻² yr⁻¹ を**導出**しています。α は既往研究レンジ 1–5 m⁻¹
+> (Larsen et al. 2014) の中央値。原論文の値が入手でき次第 `--soil_depth_mb_E0/_alpha` で
+> 差し替えてください。
+
+#### 凹地の扱い (`--soil_depth_mb_hollow_endtime`)
+
+定常解は発散斜面 (D>0) にしか存在せず、能登 DEM では **35.3%** のセルが収束斜面で、そのままだと
+全て `h_max` に張り付きます。`--soil_depth_mb_endtime 0 --soil_depth_mb_hollow_endtime 750` と
+すると、発散斜面は定常解、収束セルは「最終崩壊から 750 年ぶんの再堆積」として過渡解を使います
+(750 年 = 松四ほか 2016 が報告した表層崩壊の再来間隔 700–800 年)。
+
+#### S_c 超過セルの扱い
+
+|∇z| ≥ (1−0.025)·S_c のセルは輸送無制限 (崩壊領域) とみなして岩盤露出 (h = h_min) に固定します。
+また非線形則の発散は `soil_depth.m` と同じ解析展開 `div = K[∇²z/den + num2/(S_c²·den²)]`
+(den はセル自身の値) で評価します。流束場を数値微分すると、S_c 超過セルのクランプした流束が
+隣接セルに巨大な人工的収束を注入し、54°の急崖に 3 m の土層が出るなどの破綻が起きます
+(松四ほか 2014 p.180 が「│∇z│>S_c のセルによって値が無限大へと発散する」と述べている問題)。
+
+実行例 (能登 5 m DEM 6,193 万セル、約 69 秒):
+
+```bash
+python python/precompute_inputs.py --DEM_path lib/DEM/dem_afterEQ_5m_crop.tif --soil_depth_model massbalance --soil_depth_mb_preset matsushi --soil_depth_mb_endtime 0 --soil_depth_mb_hollow_endtime 750 --soil_depth_mb_smooth 3
+```
+
+出力は `lib/soil_depth/<DEM>_soil_depth_python_massbalance_matsushi.mat` (+ QA GeoTIFF)。
+Roering の出力 (`..._soil_depth_python.mat`) とは別名なので上書きされません。
+
+能登での結果 (上記コマンド): 平均 0.51 m / 中央値 0.38 m / 95%点 1.08 m、0.5 m 未満が 61.9%
+(Roering 5000 yr は平均 1.14 m・中央値 1.07 m・0.5 m 未満 12.2%)。尾根・急崖・谷の断面比較図は
+`python python/_viz_soil_depth_transects.py` で再生成できます。
 
 ### 5.3 `soil_strength_mode`
 
@@ -944,3 +1040,44 @@ nogrow = load_no_grow('no_grow.mat')  # returns dict
   method of slope stability analysis. *Canadian Geotechnical Journal*, 26(4), 679-686.
 - Schwanghart, W., & Scherler, D. (2014). TopoToolbox 2 - MATLAB-based software for
   topographic analysis and modeling. *Earth Surface Dynamics*, 2, 1-7.
+
+### 土層厚 massbalance モデル (§5.2)
+
+式の一次文献（モデルの中身そのもの）:
+
+- Dietrich, W. E., Reiss, R., Hsu, M.-L., & Montgomery, D. R. (1995). A process-based
+  model for colluvial soil depth and shallow landsliding using digital elevation data.
+  *Hydrological Processes*, 9, 383-400.
+  → 土層の物質収支 式(7) `ρ_soil ∂h/∂t = E_sap − ∇·q − W_soil`。
+- Heimsath, A. M., Dietrich, W. E., Nishiizumi, K., & Finkel, R. C. (1997). The soil
+  production function and landscape equilibrium. *Nature*, 388, 358-361.
+  → 土層生成関数 式(13) `E_sap = E₀ exp(−α h)`。
+- Roering, J. J., Kirchner, J. W., & Dietrich, W. E. (1999). Evidence for nonlinear,
+  diffusive sediment transport on hillslopes and implications for landscape morphology.
+  *Water Resources Research*, 35, 853-870.
+  → 非線形ソイルクリープ則 式(10) `q = −ρ_soil K ∇z / {1 − (|∇z|/S_c)²}`。
+  線形則 式(9) は McKean et al. (1993) / Small et al. (1999)。
+- Larsen, I. J., Almond, P. C., Eger, A., Stone, J. O., Montgomery, D. R., & Malcolm, B.
+  (2014). Rapid soil production and weathering in the Southern Alps, New Zealand.
+  *Science*, 343, 637-640.
+  → E₀ = 10¹–10³ g m⁻² yr⁻¹、α = 1–5 m⁻¹ という既往研究のレンジの出典。
+
+定式化・記号系と日本のパラメータ:
+
+- 松四雄騎 (2017). 宇宙線生成核種を用いた岩盤の風化と土層の生成に関する速度論
+  ─手法の原理，適用法，研究の現状と課題─. *地学雑誌*, 126(4), 487-511.
+  doi:10.5026/jgeography.126.487
+  → モデルの定式化。物質収支 式(7)、輸送則 式(9)/(10)、土層生成関数 式(13)、
+  定常形 式(14)/(15)。
+- 松四雄騎・松崎浩之・牧野久識 (2014). 宇宙線生成核種による流域削剥速度の決定と
+  地形方程式の検証. *地形*, 35(2), 165-185.
+  → `matsushi` プリセットの実測値の出典。p.181 本文に W=66.8 g m⁻² yr⁻¹、
+  ρ_r=2.6×10⁶ / ρ_s=1.9×10⁶ g m⁻³、Fig.5 に S_c=0.9–1.2 と
+  K/L=7×10⁻⁵–3×10⁻⁴ m yr⁻¹、流域削剥速度 2.0×10²–1.8×10⁴ g m⁻² yr⁻¹。
+  J-STAGE で全文無料公開。
+- 松四雄騎・外山 真・松崎浩之・千木良雅弘 (2016). 土層の生成および輸送速度の決定と
+  土層発達シミュレーションに基づく表層崩壊の発生場および崩土量の予測.
+  *地形*, 37(4), 427-453.
+  → 京都近郊の花崗岩流域への適用例。E₀ の導出根拠とした「尾根部の定常土層厚は
+  概ね 0.5 m 未満」「凹地は数百年で ~1.2 m」「表層崩壊の再来間隔 700–800 年」の
+  出典。**E₀ と α の較正値は本論文にあるが有料 (J-STAGE, PDF 14.9 MB) で未入手。**
