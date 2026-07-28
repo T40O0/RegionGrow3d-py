@@ -240,7 +240,7 @@ else:
                 0.0, 20000.0, 750.0 if mb['preset'] == 'matsushi' else 0.0,
                 50.0, key='mb_hollow', disabled=DIS,
                 help="定常解を持たない収束セル (谷頭凹地) に、最終崩壊からの"
-                     "経過時間ぶんだけ土層を堆積させます。松四ほか (2016) の"
+                     "経過時間分だけ土層を堆積させます。松四ほか (2016) の"
                      "表層崩壊再来間隔は 700–800 年。")
             if mb['preset']:
                 st.sidebar.caption(
