@@ -598,31 +598,40 @@ below 0.5 m at steady state, hollows growing to ~1.2 m over a few hundred years.
 
 #### Parameter sets (`--soil_depth_mb_preset`)
 
-| | `oregon` (= the plain defaults) | `matsushi` |
+| | `oregon` | `matsushi` |
 |---|---|---|
-| E₀ [g m⁻² yr⁻¹] | 720 | **896** (derived) |
-| α [m⁻¹] | 3.0 | 3.0 (mid of the 1–5 range) |
-| K [m² yr⁻¹] | 0.005 | **0.0092** (= K/L × L) |
-| S_c | 1.25 | **1.0** |
-| ρ_soil [kg m⁻³] | 1200 | **1900** |
-| W_soil [g m⁻² yr⁻¹] | 0 | **66.8** |
+| E₀ (D₀) [g m⁻² yr⁻¹] | 720 | **965.8** |
+| α [m⁻¹] | 3.0 | **0.948** |
+| K [m² yr⁻¹] | 0.005 | **0.005** (envelope 3.5–6.5×10⁻³) |
+| transport law | non-linear (S_c=1.25) | **linear** (S_c unused) |
+| ρ_soil [kg m⁻³] | 1200 | **1090** |
+| W_soil [g m⁻² yr⁻¹] | 0 | **0** (explicitly neglected) |
+| thickness in the SPF | vertical h | **slope-normal H = h·cosθ** |
 
-The bold `matsushi` values are measurements for Japanese granitic watersheds (Abukuma, Rokko,
-eastern Northern Alps) published in **松四雄騎・松崎浩之・牧野久識 / Matsushi, Matsuzaki & Makino
-(2014), *Transactions, Japanese Geomorphological Union* 35(2), 165–183**, p.181 and Fig. 5:
-S_c ≈ 1 (critical gradient near 45°), K/L = 7×10⁻⁵–3×10⁻⁴ m yr⁻¹, ρ_rock = 2.6×10⁶ g m⁻³,
-ρ_soil = 1.9×10⁶ g m⁻³, W = 66.8 g m⁻² yr⁻¹, basin denudation D = 2.0×10²–1.8×10⁴ g m⁻² yr⁻¹.
+The `matsushi` values are the ¹⁰Be calibration for a granite watershed near Kyoto published in
+**松四雄騎・外山 真・松崎浩之・千木良雅弘 / Matsushi, Toyama, Matsuzaki & Chigira (2016),
+*Transactions, Japanese Geomorphological Union* 37(4), 427–453**: D₀ and α from eq. (5) and Fig. 7
+(p.440), K from Fig. 6B (p.441; the preset uses their arithmetic mean of the envelope), ρ_soil from
+the mean dry unit weight (p.442). Element leaching W and the aeolian/organic input S are dropped
+because the paper argues |S − W| ≪ |D| on steep slopes (p.429). Their own run used a 1 m grid, a
+uniform 0.5 m initial mantle and 500 years, and gave 0.3–0.5 m on convex noses, ~1 m in hollows
+after 300–400 yr and a 700–800 yr shallow-landslide return period. The same paper reports
+c = 1.43 kPa, φ = 29.1°, saturated/dry unit weights 15.4/10.7 kN m⁻³ and Ksat = 2×10⁻⁴ m s⁻¹.
 
-K is published as K/L (L = hillslope length), so L has to be measured on the target DEM. For the
-Noto 5 m DEM the median distance to a 10 ha channel head is **L = 131 m** → K = 0.0092–0.039 m² yr⁻¹
-(the preset takes the lower bound). `python/_viz_soil_depth_transects.py` prints L.
+> ⚠ **These parameters do not make Noto's ridges thin.** Convex cells on the Noto 5 m DEM have a
+> median curvature of 0.0195 m⁻¹, but a 0.4 m steady soil needs 0.121 m⁻¹ — reached by only
+> **0.14 %** of them; at 0.02 m⁻¹ the steady solution is 2.30 m. Noto is therefore
+> production-limited under this parameter set, and their exact setup (0.5 m initial, 500 yr) gives a
+> nearly uniform ~0.75 m (convex noses 0.66 m, planar 0.75 m, hollows 0.86 m). Their thin noses come
+> from the sharply convex zero-order granite basins resolved by 1 m LiDAR (curvature ~0.1 m⁻¹), which
+> does not transfer to a 5 m DEM of the Noto hills. State explicitly which variant you report: the
+> steady state gives 2–3 m, their setup gives ~0.75 m.
 
-> ⚠ **E₀ and α are not Matsushi's published values.** They are in Matsushi et al. (2016),
-> *Trans. Jpn. Geomorph. Union* 37, 427–453, which is paywalled (14.9 MB PDF). Here E₀ is derived
-> from that paper's abstract ("soil thickness reaches a steady-state on nose at mostly thinner than
-> 0.5 m") plus the slowest Japanese basin denudation rate above: E₀ = 200·exp(3 × 0.5) ≈ 896
-> g m⁻² yr⁻¹. α is the middle of the published 1–5 m⁻¹ range (Larsen et al. 2014). Swap in the
-> original values with `--soil_depth_mb_E0/_alpha` when you have them.
+The earlier paper **Matsushi, Matsuzaki & Makino (2014), *Trans. Jpn. Geomorph. Union* 35(2),
+165–185** also reports Japanese granitic values (S_c ≈ 1, K/L = 7×10⁻⁵–3×10⁻⁴ m yr⁻¹,
+ρ_soil = 1.9×10⁶ g m⁻³, W = 66.8 g m⁻² yr⁻¹, basin denudation 2.0×10²–1.8×10⁴ g m⁻² yr⁻¹), but those
+belong to a basin-scale denudation / transport-law test, not to the soil-development simulation, and
+are not used by the preset.
 
 #### Hollows (`--soil_depth_mb_hollow_endtime`)
 
@@ -641,16 +650,23 @@ Differentiating the flux field numerically instead lets the clamped flux of over
 huge artificial convergence into their neighbours — a 54° cliff then ends up with 3 m of soil. This
 is the divergence Matsushi et al. (2014, p.180) describe for cells with |∇z| > S_c.
 
-Example (Noto 5 m DEM, 61.9M valid cells, ~69 s):
+Example — the same setup Matsushi et al. (2016) used, a uniform 0.5 m mantle evolved for 500 years
+(Noto 5 m DEM, 61.9M valid cells, ~67 s):
 
 ```bash
-python python/precompute_inputs.py --DEM_path lib/DEM/dem_afterEQ_5m_crop.tif --soil_depth_model massbalance --soil_depth_mb_preset matsushi --soil_depth_mb_endtime 0 --soil_depth_mb_hollow_endtime 750 --soil_depth_mb_smooth 3
+python python/precompute_inputs.py --DEM_path lib/DEM/dem_afterEQ_5m_crop.tif --soil_depth_model massbalance --soil_depth_mb_preset matsushi --soil_depth_mb_endtime 500 --soil_depth_mb_h_init 0.5 --soil_depth_mb_smooth 1
 ```
 
 Output goes to `lib/soil_depth/<DEM>_soil_depth_python_massbalance_matsushi.mat` (+ QA GeoTIFF); the
-Roering output (`..._soil_depth_python.mat`) is a different filename and is not overwritten. Result:
-mean 0.51 m, median 0.38 m, 95th pct 1.08 m, 61.9 % of cells below 0.5 m (Roering 5000 yr: mean
-1.14 m, median 1.07 m, 12.2 % below 0.5 m).
+Roering output (`..._soil_depth_python.mat`) is a different filename and is not overwritten. Result
+over land only: mean 0.756 m, median 0.749 m, 5–95th pct 0.63–0.89 m; convex noses 0.66 m, planar
+0.75 m, hollows 0.86 m (Roering 5000 yr: mean 1.14 m, median 1.06 m, 13.8 % below 0.5 m).
+
+> ⚠ Always mask the sea before computing statistics or drawing maps. This DEM fills the sea with
+> ~0–0.5 m, so no elevation threshold separates it from low coastal land; rasterize
+> `lib/coastline/N03-20260101_17.shp` instead (land = 56,386,695 cells = 1,410 km²). The product
+> raster itself keeps values everywhere because the driver expects a soil depth wherever the DEM is
+> valid.
 
 ### 5.3 `soil_strength_mode`
 

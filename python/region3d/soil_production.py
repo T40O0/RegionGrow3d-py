@@ -105,6 +105,11 @@ class SoilProductionParams:
         (review eq. 7).  0 = element leaching in the soil is neglected.
     transport : str
         ``'nonlinear'`` (review eq. 10) or ``'linear'`` (review eq. 9).
+    slope_normal : bool
+        If True the soil production function is driven by the slope-normal
+        thickness ``H = h cos(theta)`` rather than the vertical thickness ``h``
+        (松四ほか 2016 eq. 5 and Fig. 1).  Since ``cos(theta)`` is fixed by the
+        topography this is just a per-cell rescaling of ``alpha``.
 
     Notes
     -----
@@ -124,6 +129,7 @@ class SoilProductionParams:
     rho_soil: float = 1200.0   # kg m-3
     W_soil: float = 0.0        # g m-2 yr-1
     transport: str = 'nonlinear'
+    slope_normal: bool = False  # measure h along the slope normal, H = h cos(theta)
 
     def validate(self) -> None:
         if self.E0 <= 0:
@@ -161,8 +167,10 @@ def params_from_namespace(args) -> SoilProductionParams:
             val = float(getattr(args, cli))
             if val != PRESETS['oregon'][key]:     # argparse defaults = oregon
                 base[key] = val
-        return SoilProductionParams(
-            transport=str(args.soil_depth_mb_transport).lower(), **base)
+        cli_transport = str(args.soil_depth_mb_transport).lower()
+        if cli_transport != PRESETS['oregon']['transport']:
+            base['transport'] = cli_transport
+        return SoilProductionParams(**base)
     return SoilProductionParams(
         E0=float(args.soil_depth_mb_E0),
         alpha=float(args.soil_depth_mb_alpha),
@@ -180,19 +188,23 @@ PRESETS = {
     # (Roering/Heimsath, Oregon Coast Range: Po=3e-4 m/yr, mu=3, K=0.005,
     #  Sc=1.25, prps=rho_rock/rho_soil=2)
     'oregon': dict(E0=720.0, alpha=3.0, K=0.005, Sc=1.25, rho_soil=1200.0,
-                   W_soil=0.0),
-    # Japanese granitic watersheds (阿武隈・六甲・北アルプス東縁), from
-    # 松四雄騎・松崎浩之・牧野久識 (2014) 地形 35(2), 165-183, p.181 + Fig.5:
-    #   Sc = 0.9-1.2 (text: critical gradient near 45 deg, Sc ~1)
-    #   K/L = 7e-5 - 3e-4 m/yr   (K = that times the hillslope length L)
-    #   rho_soil = 1.9e6 g/m3, rho_rock = 2.6e6 g/m3, W = 66.8 g/m2/yr
-    # E0/alpha are not published there; E0 is derived so that the thinnest
-    # steady nose soil reported by 松四ほか (2016) (~0.5 m) sustains the slowest
-    # Japanese basin denudation rate (2.0e2 g/m2/yr): E0 = 200*exp(3*0.5) = 896.
-    # K = 0.0092 uses L = 131 m, the median distance to a 10 ha channel head on
-    # the Noto 5 m DEM — recompute L for a different DEM.
-    'matsushi': dict(E0=896.0, alpha=3.0, K=0.0092, Sc=1.0, rho_soil=1900.0,
-                     W_soil=66.8),
+                   W_soil=0.0, transport='nonlinear', slope_normal=False),
+    # Calibrated values for a granite watershed near Kyoto, measured with
+    # cosmogenic 10Be by 松四雄騎・外山 真・松崎浩之・千木良雅弘 (2016)
+    # 「土層の生成および輸送速度の決定と土層発達シミュレーションに基づく
+    #   表層崩壊の発生場および崩土量の予測」地形 37(4), 427-453:
+    #   D0 = 965.8 g m-2 yr-1, alpha = 0.948 m-1   (p.440, eq.5 + Fig.7)
+    #   K  = 5e-3 m2 yr-1 (envelope 3.5e-3 - 6.5e-3)   (p.441, Fig.6B)
+    #   rho_soil = 1.09e6 g m-3, from the mean dry unit weight (p.442)
+    #   transport: LINEAR, q = -rho_soil K grad z     (eq.2)
+    #   W (and the aeolian/organic input S) are explicitly neglected: the paper
+    #   argues |S - W| << |D| on steep slopes (p.429)
+    #   the production function uses the SLOPE-NORMAL thickness H = h cos(theta)
+    # Their own simulation ran 500 yr from a uniform 0.5 m mantle on a 1 m grid
+    # and gave 0.3-0.5 m on convex noses, ~1 m in hollows after 300-400 yr, and
+    # a 700-800 yr shallow-landslide return period.
+    'matsushi': dict(E0=965.8, alpha=0.948, K=0.005, Sc=1.25, rho_soil=1090.0,
+                     W_soil=0.0, transport='linear', slope_normal=True),
 }
 
 
@@ -243,7 +255,7 @@ def _flux_divergence(z: np.ndarray, dx: float, dy: float,
            + (zp[1:-1, :-2] + zp[1:-1, 2:] - 2.0 * z) / (dx * dx))
 
     if params.transport == 'linear':
-        return -params.K * lap, np.zeros(z.shape, dtype=bool)
+        return -params.K * lap, np.zeros(z.shape, dtype=bool), slope
 
     Sc = params.Sc
     oversteep = slope >= (1.0 - grac) * Sc
@@ -257,7 +269,7 @@ def _flux_divergence(z: np.ndarray, dx: float, dy: float,
                   + 2.0 * dzdx * dzdy * zxy)
     div_F = params.K * (lap / den + num2 / (Sc * Sc * den * den))
     # q = -rho_soil * F  ->  div(q) = -rho_soil * div(F);  divide by rho_soil.
-    return -div_F, oversteep
+    return -div_F, oversteep, slope
 
 
 def soil_depth_massbalance(Z: np.ndarray, x_cellsize: float,
@@ -330,13 +342,19 @@ def soil_depth_massbalance(Z: np.ndarray, x_cellsize: float,
         z_filled = gaussian_filter(z_filled, sigma=float(smooth_sigma),
                                    mode='nearest')
 
-    div_over_rho, oversteep = _flux_divergence(z_filled, dx, dy, params)
+    div_over_rho, oversteep, slope = _flux_divergence(z_filled, dx, dy, params)
 
     rho_g = params.rho_soil * 1000.0          # kg m-3 -> g m-3
     # D = div(q) + W_soil : the mass export the soil column has to sustain.
     D = div_over_rho * rho_g + params.W_soil  # g m-2 yr-1
-    a = params.alpha
+    # Production driven by the slope-normal thickness H = h cos(theta) is the
+    # same algebra with a per-cell alpha (松四ほか 2016 eq.5).
+    a = (params.alpha * np.cos(np.arctan(slope)) if params.slope_normal
+         else params.alpha)
     E0 = params.E0
+
+    # `a` is a scalar, or a per-cell array when slope_normal is on
+    a_full = np.broadcast_to(np.asarray(a, dtype=np.float64), D.shape)
 
     def _solve(t: Optional[float]) -> np.ndarray:
         """Closed-form h for the whole grid; ``t=None`` -> steady state."""
@@ -344,19 +362,20 @@ def soil_depth_massbalance(Z: np.ndarray, x_cellsize: float,
             # h = -(1/a) ln(D/E0); only 0 < D < E0 gives a positive thickness.
             out = np.full(D.shape, np.nan, dtype=np.float64)
             pos = D > 0
-            out[pos] = -np.log(D[pos] / E0) / a
+            out[pos] = -np.log(D[pos] / E0) / a_full[pos]
             # D <= 0 (convergent): no steady state -> accumulation, cap it.
             out[~pos] = h_max
             return out
-        u0 = np.exp(a * h_init)
+        u0 = np.exp(a_full * h_init)
         u = np.empty(D.shape, dtype=np.float64)
         zero = D == 0.0
         nz = ~zero
-        expo = np.clip(-a * D[nz] * t / rho_g, -700.0, 700.0)  # keep exp finite
-        u[nz] = (E0 - (E0 - D[nz] * u0) * np.exp(expo)) / D[nz]
-        u[zero] = u0 + a * E0 * t / rho_g          # pure production, no export
+        expo = np.clip(-a_full[nz] * D[nz] * t / rho_g, -700.0, 700.0)
+        u[nz] = (E0 - (E0 - D[nz] * u0[nz]) * np.exp(expo)) / D[nz]
+        # D == 0: pure production, no export
+        u[zero] = u0[zero] + a_full[zero] * E0 * t / rho_g
         u = np.where(np.isfinite(u), u, np.inf)
-        return np.where(u > 0.0, np.log(np.maximum(u, 1e-300)) / a, 0.0)
+        return np.where(u > 0.0, np.log(np.maximum(u, 1e-300)) / a_full, 0.0)
 
     steady = endtime is None or endtime <= 0
     composite = steady and hollow_endtime is not None and hollow_endtime > 0
