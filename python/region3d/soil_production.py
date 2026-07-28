@@ -203,6 +203,10 @@ PRESETS = {
     # Their own simulation ran 500 yr from a uniform 0.5 m mantle on a 1 m grid
     # and gave 0.3-0.5 m on convex noses, ~1 m in hollows after 300-400 yr, and
     # a 700-800 yr shallow-landslide return period.
+    # NOTE: their noses have 5 m curvatures of +0.1..+0.25 1/m (Fig.6B). On
+    # terrain an order of magnitude gentler (e.g. the Noto 5 m DEM, median
+    # convex curvature ~0.02) this set is production-limited: thickness is set
+    # by h_init + elapsed time, not by the topography. See docs/MANUAL §5.2.
     'matsushi': dict(E0=965.8, alpha=0.948, K=0.005, Sc=1.25, rho_soil=1090.0,
                      W_soil=0.0, transport='linear', slope_normal=True),
 }

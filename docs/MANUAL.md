@@ -622,10 +622,15 @@ c = 1.43 kPa, φ = 29.1°, saturated/dry unit weights 15.4/10.7 kN m⁻³ and Ks
 > median curvature of 0.0195 m⁻¹, but a 0.4 m steady soil needs 0.121 m⁻¹ — reached by only
 > **0.14 %** of them; at 0.02 m⁻¹ the steady solution is 2.30 m. Noto is therefore
 > production-limited under this parameter set, and their exact setup (0.5 m initial, 500 yr) gives a
-> nearly uniform ~0.75 m (convex noses 0.66 m, planar 0.75 m, hollows 0.86 m). Their thin noses come
-> from the sharply convex zero-order granite basins resolved by 1 m LiDAR (curvature ~0.1 m⁻¹), which
-> does not transfer to a 5 m DEM of the Noto hills. State explicitly which variant you report: the
+> nearly uniform ~0.75 m (convex noses 0.66 m, planar 0.75 m, hollows 0.86 m). This is a site
+> difference, not a parameter error: their own Fig. 6B shows nose cells of the Shirakawa watershed
+> at 5 m curvatures of **+0.1 to +0.25 m⁻¹** (regression −∇²z = −0.34H + 0.22) — an order of
+> magnitude sharper than Noto — and the paper itself notes that α = 0.948 sits below the published
+> 1.4–3.8 m⁻¹ range while D₀ is high (p.440). State explicitly which variant you report: the
 > steady state gives 2–3 m, their setup gives ~0.75 m.
+>
+> Verification: the closed-form solver matches the paper's own numerical scheme (forward Euler of
+> eq. 7, 1 yr × 500 steps) to within 0.0001 m on a 300×300-cell Noto window (2026-07-28).
 
 The earlier paper **Matsushi, Matsuzaki & Makino (2014), *Trans. Jpn. Geomorph. Union* 35(2),
 165–185** also reports Japanese granitic values (S_c ≈ 1, K/L = 7×10⁻⁵–3×10⁻⁴ m yr⁻¹,
@@ -1132,17 +1137,20 @@ Formulation followed here, and the Japanese parameters:
   rates of mountainous watersheds using terrestrial cosmogenic nuclides.
   *Transactions, Japanese Geomorphological Union*, 35(2), 165–185.
   (in Japanese with English abstract)
-  → source of the `matsushi` preset: W = 66.8 g m⁻² yr⁻¹, ρ_rock = 2.6×10⁶ and
-  ρ_soil = 1.9×10⁶ g m⁻³ (p.181), S_c = 0.9–1.2 and K/L = 7×10⁻⁵–3×10⁻⁴ m yr⁻¹
-  and basin denudation 2.0×10²–1.8×10⁴ g m⁻² yr⁻¹ (Fig. 5). Open access on
-  J-STAGE.
+  → basin-scale values for Japanese granitic watersheds (S_c ≈ 1,
+  K/L = 7×10⁻⁵–3×10⁻⁴ m yr⁻¹, W = 66.8 g m⁻² yr⁻¹, basin denudation
+  2.0×10²–1.8×10⁴ g m⁻² yr⁻¹). A transport-law test, NOT used by the
+  `matsushi` preset. Open access on J-STAGE.
 - Matsushi, Y., Toyama, M., Matsuzaki, H., & Chigira, M. / 松四雄騎・外山 真・
   松崎浩之・千木良雅弘 (2016). Simulation of soil production and transport for
   prediction of location and magnitude of shallow landslides. *Transactions,
   Japanese Geomorphological Union*, 37(4), 427–453.
   (in Japanese with English abstract)
-  → application to a granite watershed near Kyoto; the source of the figures E₀
-  was derived from (steady nose soil mostly < 0.5 m, hollows filling to ~1.2 m
-  in a few hundred years, 700–800 yr shallow-landslide return period).
-  **The calibrated E₀ and α are in this paper but it is paywalled (J-STAGE,
-  14.9 MB PDF) and was not obtained.**
+  → **the source of the `matsushi` preset** (Shirakawa watershed, Cretaceous
+  granite east of the Kyoto basin): D₀ = 965.8 g m⁻² yr⁻¹ and α = 0.948 m⁻¹
+  (p.440, eq. 5 + Fig. 7), K = 5×10⁻³ m² yr⁻¹ (mean of the 3.5–6.5×10⁻³
+  envelope, Fig. 6B), ρ_soil = 1.09×10⁶ g m⁻³ (p.442), update rule
+  ∂h/∂t = K∇²z + (D₀/ρ_soil)e^(−αh|cosθ|) (eq. 7). In-situ values c = 1.43 kPa,
+  φ = 29.1°, γ_sat/γ_dry = 15.4/10.7 kN m⁻³, K_sat ≈ 2×10⁻⁴ m s⁻¹ (Table 3,
+  Fig. 8). Every parameter cross-checked against the paper's pages and figures
+  (2026-07-28).
